@@ -1,0 +1,31 @@
+# publish.yml — tag 触发 npm 发布
+# ⚠️ 需仓库 owner 配置: Settings → Secrets and variables → Actions → 添加
+# `NPM_TOKEN` (npmjs.com 的 Automation 类型 access token, 双因素认证下也能发布)。
+# 发布流程: push tag v* → 全量验证 (test/typecheck/build) → npm publish (public)。
+name: publish
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance (发布来源可追溯)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run typecheck
+      - run: bun run build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          registry-url: https://registry.npmjs.org
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

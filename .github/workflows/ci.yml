@@ -1,0 +1,43 @@
+# ci.yml — PR/push 持续验证 (bun install → test → build)
+# 覆盖: 单测 (三家解析器/聚合/hash golden/参数) + TS 严格类型检查 (含 tests) +
+# tsc 构建可通过 (dist 产物即 npm 发布物)。
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run typecheck
+      - run: bun run build
+
+  # npx 场景回归: dist 产物在 node (非 bun) 下可跑 — node:sqlite 适配分支的 CI 覆盖
+  node-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: node dist/cli.js --version
+      # CI runner 无 agent 数据: exit 1 (未收集到) 与 0 都是"跑通", 只有 ≥2 (意外崩溃) 才红。
+      # node 须以 || 挂接 — GH Actions 默认 bash -e 下, 裸 `;` 分隔会在非零退出时
+      # 中止整个步骤, 后续守卫不可达
+      - run: |
+          code=0
+          node dist/cli.js --json --days 7 || code=$?
+          [ "$code" -le 1 ]

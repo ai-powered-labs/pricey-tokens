@@ -18,7 +18,8 @@
 //   payload.type ∈ {function_call, custom_tool_call, local_shell_call,
 //   web_search_call} (输出型 *_output 是结果不计)。归属: response 的 function_call
 //   落盘先于其 token_count 事件 (流内 item 先到, 完成时才发 token_count), 故 pending
-//   工具计数记到**下一个** token_count 请求行; 末尾未跟请求的 pending 丢弃。
+//   工具计数记到**下一个** token_count 请求行; 末尾未跟请求的 pending 丢弃; 增量为
+//   全零/无时刻而被剔除的事件行同样带走其 pending (极边缘少计, 有意 — 不变量无恙)。
 // n_turns (v2): turn_context 事件计数 (每用户轮恰好一个, 持久化策略恒落盘)。
 // 归并键: reqKey = "<rollout 文件名>#<文件内 token_count 事件序号 (1 起)>";
 // turnKey = "<rollout 文件名>#tc<turn_context 序号 (1 起)>";

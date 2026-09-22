@@ -46,14 +46,20 @@ export interface IngestOptions {
   dataRoot: string; // opencode 源与账本共用的 XDG 数据根 (已解析 — 与 Ledger.open 同源)
 }
 
-// 批次落账: 归并 (请求 + 轮次) → 会话重算 → 受影响日重算 (水位线推进由调用方在
-// 批后执行 — 顺序即崩溃一致性)。受影响日 = 请求行 ts 日 ∪ 被覆盖行旧 ts 日 ∪ 会话
-// 归因日迁移 (last_ts 换日时旧归因日必须重算, 否则 maxCtxHist/nTurns 残留双计)。
+// 批次落账: 归并 (请求 + 轮次) → 会话重算 → 受影响日重算, **单事务原子** (水位线
+// 推进由调用方在批后执行 — 顺序即崩溃一致性: 批内任一步崩溃整批回滚, 水位线未
+// 推进, 下次重扫同源幂等重做; 多事务批内的中途断裂面 — 如无轮次会话的同值重放
+// 不自愈 — 由此消除)。受影响日 = 请求行 ts 日 ∪ 被覆盖行旧 ts 日 ∪ 会话归因日
+// 迁移 (last_ts 换日时旧归因日必须重算, 否则 maxCtxHist/nTurns 残留双计)。
 function commitBatch(ledger: Ledger, rows: readonly RequestRow[], turns: readonly TurnRow[]): number {
-  const {changed, days, sessions} = ledger.insertRequests(rows);
-  const turnSessions = ledger.insertTurns(turns);
-  const sessDays = ledger.recomputeSessions([...sessions, ...turnSessions]);
-  ledger.recomputeDays([...days, ...sessDays]);
+  let changed = 0;
+  ledger.runInTx(() => {
+    const r = ledger.insertRequests(rows);
+    const turnSessions = ledger.insertTurns(turns);
+    const sessDays = ledger.recomputeSessions([...r.sessions, ...turnSessions]);
+    ledger.recomputeDays([...r.days, ...sessDays]);
+    changed = r.changed;
+  });
   return changed;
 }
 

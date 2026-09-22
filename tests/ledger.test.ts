@@ -480,6 +480,39 @@ describe("session_stats 物化 (主模型归因 + 轮次 join)", () => {
     expect(JSON.stringify(await readDayStats(home))).toBe(day1);
     l.close();
   });
+
+  it("覆盖换会话 (库重建 rowid 复用形态): 旧会话入重算集 → 无残留, ΣmaxCtxHist 守卫不误触", async () => {
+    const home = await freshHome();
+    const l = await Ledger.open(home);
+    // 首: reqKey k 归 sA (ctx 深); 重建后: 同 reqKey 归 sB → sA 必须消失
+    ingestBatch(l, [row({reqKey: "k", sessKey: "sA", ts: T, inT: 100000})], [{harness: "opencode", turnKey: "db:1", sessKey: "sA"}]);
+    ingestBatch(l, [row({reqKey: "k", sessKey: "sB", ts: T, inT: 5000})], [{harness: "opencode", turnKey: "db:1", sessKey: "sB"}]); // 轮次同键换绑
+    const sess = await readSessions(home);
+    expect(sess.map((s) => s.sess_key)).toEqual(["sB"]); // sA 无请求 → 不残留
+    expect(sess[0]!.n_turns).toBe(1); // 轮次已随 latest-wins 换绑 sB
+    // 出口守卫可通过 (修复前: sA 残留致 ΣmaxCtxHist=2 > ΣnSess=1 误触)
+    const days = l.profileDays(null, []);
+    expect(days[0]!.models[0]!.maxCtxHist.reduce((a, b) => a + b, 0)).toBe(1);
+    l.close();
+  });
+
+  it("批次单事务原子: runInTx 内抛错 → 整批回滚 (请求/轮次/物化三者一致)", async () => {
+    const home = await freshHome();
+    const l = await Ledger.open(home);
+    ingestBatch(l, [row({reqKey: "a", ts: T})]); // 基线: 1 请求已落
+    const before = JSON.stringify(await readDayStats(home));
+    expect(() =>
+      l.runInTx(() => {
+        l.insertRequests([row({reqKey: "b", ts: T})]);
+        l.insertTurns([{harness: "opencode", turnKey: "t1", sessKey: "s0"}]);
+        throw new Error("模拟批内崩溃");
+      })
+    ).toThrow("模拟批内崩溃");
+    expect(l.requestCount()).toBe(1); // 请求回滚
+    const after = await readDayStats(home);
+    expect(JSON.stringify(after)).toBe(before); // 物化不残留半批状态
+    l.close();
+  });
 });
 
 describe("v2 → v3 迁移 (自动回填)", () => {

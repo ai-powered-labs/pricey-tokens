@@ -6,8 +6,9 @@
 //     行真不可变, 覆盖与忽略等价)。降级档预留: 未来只给会话累计的源用 req_key 前缀
 //     '~sess~' + sess_key, latest-wins (当前三家源均有 request 粒度, 仅预留命名空间)。
 //   - turn_events 表: 用户轮次原子 (v3)。用户行不入 requests (不构成用量), 摄取时
-//     顺路计数, INSERT OR IGNORE 幂等 — 与 requests 同款 "行原子 + 键归并" 哲学,
-//     源重扫/库重建均不双计; requests 行永不删 ⇒ 轮次行同样只增不减, 两侧一致陈旧。
+//     顺路计数, 同键幂等 (sess_key 后值覆盖, 库重建 rowid 复用时刷新绑定) — 与
+//     requests 同款 "行原子 + 键归并" 哲学, 源重扫/库重建均不双计; requests 行
+//     永不删 ⇒ 轮次行同样只增不减, 两侧一致陈旧。
 //   - session_stats 表 (v3 物化): (harness, sess_key) 会话行 — first/last ts, day=
 //     localDayKey(last_ts), 主模型 (产生 max_ctx 请求的模型, 并列取后到者), n_turns
 //     (turn_events 计数 join), n_tools (requests Σ), 四分类 Σ, max_ctx (ctxEstimate
@@ -96,6 +97,7 @@ CREATE TABLE IF NOT EXISTS session_stats (
   max_ctx  INTEGER NOT NULL,
   PRIMARY KEY (harness, sess_key)
 );
+CREATE INDEX IF NOT EXISTS idx_session_stats_day ON session_stats (day);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS day_stats (
   day TEXT NOT NULL, model TEXT NOT NULL,
@@ -247,7 +249,8 @@ export class Ledger {
         sess_key = excluded.sess_key, model = excluded.model, ts = excluded.ts,
         in_t = excluded.in_t, out_t = excluded.out_t, cr_t = excluded.cr_t, cw_t = excluded.cw_t,
         n_tools = excluded.n_tools`);
-    this.insertTurn = db.prepare("INSERT OR IGNORE INTO turn_events (harness, turn_key, sess_key) VALUES (?,?,?)");
+    this.insertTurn = db.prepare(`INSERT INTO turn_events (harness, turn_key, sess_key) VALUES (?,?,?)
+      ON CONFLICT(harness, turn_key) DO UPDATE SET sess_key = excluded.sess_key`);
     this.selectRow = db.prepare("SELECT sess_key, model, ts, in_t, out_t, cr_t, cw_t, n_tools FROM requests WHERE harness = ? AND req_key = ?");
     this.getMetaStmt = db.prepare("SELECT v FROM meta WHERE k = ?");
     this.setMetaStmt = db.prepare("INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v");
@@ -296,6 +299,7 @@ export class Ledger {
       return ledger;
     } catch (e) {
       db.exec("ROLLBACK");
+      db.close();
       throw e;
     }
   }
@@ -333,12 +337,21 @@ export class Ledger {
     }
   }
 
+  /** 单事务包裹一批写操作 (SAVEPOINT 嵌套: 外层=事务, 内层=保存点)。摄取编排把
+   * "归并 + 重算" 收进单事务 — 崩溃整批回滚 → 水位线未推进 → 重扫全量重做
+   * (幂等); 多事务批内的中途断裂面 (无轮次会话的同值重放不自愈形态) 由此消除。 */
+  runInTx(fn: () => void): void {
+    this.tx(fn);
+  }
+
   // 幂等归并一批请求行; 返回 {changed, days, sessions}:
   //   changed = 实际落账变更行数 (同值重放 = 0 — 不双计的锚点; claude 流式终值
   //   覆盖计 1)。变化判定在 TS 侧 (PK 点查旧行, 首跑空表全 miss 零代价)。
   //   days = 受影响日全集 — 变更行的 ts 日 **加上被覆盖行的旧 ts 日** (upsert
   //   换日覆盖时旧日必须重算, 否则 day_stats 残留旧值, 物化与真值永久分叉)。
-  //   sessions = 变更行的 (harness, sess_key) 全集 (session_stats 重算单位)。
+  //   sessions = 变更行会话 ∪ 被覆盖行旧会话 (upsert 换 sess_key 覆盖时 — 库重建
+  //   rowid 复用形态 — 旧会话的 session_stats 必须重算, 否则残留已迁走请求的
+  //   max_ctx/轮次, ΣmaxCtxHist 守卫误触)。
   insertRequests(rows: readonly RequestRow[]): {changed: number; days: Set<string>; sessions: SessRef[]} {
     if (rows.length === 0) return {changed: 0, days: new Set(), sessions: []};
     const days = new Set<string>();
@@ -358,6 +371,7 @@ export class Ledger {
         } else {
           if ((prev.ts as number) !== r.ts) days.add(localDayKey(prev.ts as number)); // 被覆盖行旧日
           days.add(localDayKey(r.ts));
+          if ((prev.sess_key as string) !== r.sessKey) sessKeys.add(sessRefKey({harness: r.harness, sessKey: prev.sess_key as string})); // 被覆盖行旧会话
         }
         this.upsertReq.run(r.harness, r.reqKey, r.sessKey, r.model, r.ts, r.inT, r.outT, r.crT, r.cwT, r.nTools);
         sessKeys.add(sessRefKey({harness: r.harness, sessKey: r.sessKey}));
@@ -371,8 +385,9 @@ export class Ledger {
     return {changed, days, sessions};
   }
 
-  // 幂等归并一批用户轮次行 (INSERT OR IGNORE, 同键重放零写入); 返回出现过的会话
-  // 全集 (无论是否新插入 — 轮次计数变化与请求变化共用同一重算路径, 集合语义足够)
+  // 幂等归并一批用户轮次行 (同键重放零变化; sess_key 后值覆盖 — 库重建 rowid 复用
+  // 换会话时刷新绑定, 与 requests 同款 latest-wins); 返回出现过的会话全集 (无论
+  // 是否新插入 — 轮次计数变化与请求变化共用同一重算路径, 集合语义足够)
   insertTurns(rows: readonly TurnRow[]): SessRef[] {
     if (rows.length === 0) return [];
     const sessKeys = new Set<string>();
@@ -580,19 +595,22 @@ export class Ledger {
   }
 
   // 对账: 指定 harness 的 per-session rollup (sess_key, model) → 四分类和
+  // (IN 列表按 SQL_CHUNK 分块, 与 recompute 路径同纪律 — 大会话集不撞变量数上限)
   sessionRollups(harness: HarnessId, sessKeys: readonly string[]): Map<string, SessionRollup[]> {
     const rollups = new Map<string, SessionRollup[]>();
     if (sessKeys.length === 0) return rollups;
     const stmt = this.db.prepare(`SELECT sess_key, model, SUM(in_t) AS in_t, SUM(out_t) AS out_t, SUM(cr_t) AS cr_t, SUM(cw_t) AS cw_t
-      FROM requests WHERE harness = ? AND sess_key IN (${sessKeys.map(() => "?").join(",")}) GROUP BY sess_key, model`);
-    for (const r of stmt.all(harness, ...sessKeys)) {
-      const sess = String(r.sess_key);
-      let list = rollups.get(sess);
-      if (!list) {
-        list = [];
-        rollups.set(sess, list);
+      FROM requests WHERE harness = ? AND sess_key IN (${Array.from({length: Math.min(SQL_CHUNK, sessKeys.length)}, () => "?").join(",")}) GROUP BY sess_key, model`);
+    for (let i = 0; i < sessKeys.length; i += SQL_CHUNK) {
+      for (const r of stmt.all(harness, ...sessKeys.slice(i, i + SQL_CHUNK))) {
+        const sess = String(r.sess_key);
+        let list = rollups.get(sess);
+        if (!list) {
+          list = [];
+          rollups.set(sess, list);
+        }
+        list.push({model: String(r.model), inT: r.in_t as number, outT: r.out_t as number, crT: r.cr_t as number, cwT: r.cw_t as number});
       }
-      list.push({model: String(r.model), inT: r.in_t as number, outT: r.out_t as number, crT: r.cr_t as number, cwT: r.cw_t as number});
     }
     return rollups;
   }

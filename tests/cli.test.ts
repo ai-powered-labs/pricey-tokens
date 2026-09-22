@@ -1,11 +1,14 @@
 // cli.test.ts — CLI 编排出口测试 (子进程跑 src/cli.ts, 断言退出码与 stdout/stderr 纪律)
 // 覆盖: --help/--version 前置短路 (exit 0, 不落参数错误)、未知参数 exit 1、空数据
-// home exit 1、--json stdout 纯净可 parse、默认模式 stdout 是 URL、HOME/XDG 注入。
+// home exit 1、--json stdout 纯净可 parse、默认模式 stdout 分流 (非 TTY 只有 URL —
+// 机读管道契约; TTY 不打长 URL — script 伪终端; 两者均落盘 last-share-url.txt)、
+// 落盘失败回退打印、HOME/XDG 注入。
 import {describe, expect, it} from "bun:test";
-import {mkdtemp, mkdir, rm} from "node:fs/promises";
+import {mkdtemp, mkdir, rm, readFile, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {T0, claudeAssistant, writeLines} from "./fixtures.js";
+import {dataDir} from "../src/discover.js";
+import {claudeAssistant, writeLines} from "./fixtures.js";
 
 interface RunResult {
   code: number;
@@ -13,26 +16,56 @@ interface RunResult {
   stderr: string;
 }
 
-async function runCli(args: string[], env: Record<string, string>): Promise<RunResult> {
-  const proc = Bun.spawn(["bun", "src/cli.ts", ...args], {
+// 共享 spawn 排水管线 (runCli 与 runCliTty 仅 argv 构造/pty 归一不同)
+async function run(argv: string[], env: Record<string, string>): Promise<RunResult> {
+  const proc = Bun.spawn(argv, {
     cwd: import.meta.dir + "/..",
     stdout: "pipe",
     stderr: "pipe",
     env: {...process.env, ...env},
   });
   const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  const code = await proc.exited;
-  return {code, stdout, stderr};
+  return {code: await proc.exited, stdout, stderr};
 }
 
-// 无 harness 数据的临时 home (HOME + XDG_CONFIG_HOME 都指走, 防污染真实 device-key)
-async function emptyHome(): Promise<{home: string; env: Record<string, string>; cleanup: () => Promise<void>}> {
+async function runCli(args: string[], env: Record<string, string>): Promise<RunResult> {
+  return run(["bun", "src/cli.ts", ...args], env);
+}
+
+// 伪终端跑 CLI (stdout.isTTY === true 的可信测试面): script 分配 pty; pty 下
+// stdout/stderr 合流且 \n→\r\n — 断言前统一 normalize (仅 win32 无 script, 跳过)。
+// 坑: darwin 的 BSD script 无 -e 旗标, 子进程退出码不传播 — 勿在此加非零退出码断言
+async function runCliTty(args: string[], env: Record<string, string>): Promise<RunResult> {
+  const cmd = ["bun", "src/cli.ts", ...args];
+  const argv = process.platform === "darwin" ? ["script", "-q", "/dev/null", ...cmd] : ["script", "-qec", cmd.join(" "), "/dev/null"];
+  const r = await run(argv, env);
+  const norm = (s: string): string => s.replace(/\r\n/g, "\n");
+  return {...r, stdout: norm(r.stdout), stderr: norm(r.stderr)};
+}
+
+// 测试临时 home (HOME + XDG_CONFIG_HOME + XDG_DATA_HOME 全指走, 防污染真实
+// device-key 与数据目录/分享 URL 文件); urlFile = 落盘路径 SSOT (dataDir)
+interface TempHome {
+  home: string;
+  env: {HOME: string; XDG_CONFIG_HOME: string; XDG_DATA_HOME: string};
+  urlFile: string;
+  cleanup: () => Promise<void>;
+}
+
+// 无 harness 数据的空 home
+async function emptyHome(): Promise<TempHome> {
   const home = await mkdtemp(join(tmpdir(), "pt-cli-"));
-  return {
-    home,
-    env: {HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local", "share")},
-    cleanup: () => rm(home, {recursive: true, force: true}),
-  };
+  const env = {HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local", "share")};
+  return {home, env, urlFile: join(dataDir(env.XDG_DATA_HOME), "last-share-url.txt"), cleanup: () => rm(home, {recursive: true, force: true})};
+}
+
+// 有数据 home: 单条 1h 前的 claude assistant 消息 (默认出口的最小可复现数据)
+async function homeWithMsg(): Promise<TempHome> {
+  const h = await emptyHome();
+  await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
+    claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
+  ]);
+  return h;
 }
 
 describe("cli 参数出口", () => {
@@ -86,11 +119,8 @@ describe("cli 数据出口", () => {
   });
 
   it("有数据: --json stdout 纯 JSON 可 parse (过程详情默认隐藏, stderr 无探测报告)", async () => {
-    const h = await emptyHome();
+    const h = await homeWithMsg();
     try {
-      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
-        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 86400000}),
-      ]);
       const r = await runCli(["--json", "--days", "7"], h.env);
       expect(r.code).toBe(0);
       const profile = JSON.parse(r.stdout); // stdout 纯 JSON (任何诊断混入都会炸)
@@ -111,11 +141,8 @@ describe("cli 数据出口", () => {
   });
 
   it("有数据: 二跑增量秒级路径 — 未变文件零重收且输出等价 (账本幂等)", async () => {
-    const h = await emptyHome();
+    const h = await homeWithMsg();
     try {
-      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
-        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
-      ]);
       const r1 = await runCli(["--json", "--days", "7"], h.env);
       const r2 = await runCli(["--json", "--verbose", "--days", "7"], h.env); // 增量详情走 verbose
       expect(r2.code).toBe(0);
@@ -130,15 +157,101 @@ describe("cli 数据出口", () => {
     }
   });
 
-  it("有数据: 默认模式 stdout 是 #u= URL, 不打开浏览器路径也可复现", async () => {
-    const h = await emptyHome();
+  it("有数据: 默认模式非 TTY stdout 只有 URL (机读管道契约), 完整 URL 落盘 last-share-url.txt", async () => {
+    const h = await homeWithMsg();
     try {
-      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
-        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
-      ]);
       const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
       expect(r.code).toBe(0);
-      expect(r.stdout.trim()).toMatch(/^http:\/\/localhost:19999\/calc\/#u=/);
+      expect(r.stdout).toMatch(/^http:\/\/localhost:19999\/calc\/#u=\S+\n$/); // stdout 纪律: 非 TTY 只有 URL (单行, 可 | pbcopy)
+      expect(r.stderr).toMatch(/分享链接 \(\d+\.\dKB\)/); // 提示行含链接大小 (stderr 不污染管道)
+      expect(r.stderr).toContain("last-share-url.txt");
+      const content = await readFile(h.urlFile, "utf8"); // 一行 URL + 尾随换行
+      expect(content).toMatch(/^http:\/\/localhost:19999\/calc\/#u=.+\n$/);
+      await expect(readFile(`${h.urlFile}.tmp`)).rejects.toThrow(); // 原子写不留 .tmp 残留
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("有数据: TTY 终端不打长 URL (刷屏治理), 提示与落盘照常 (script 伪终端)", async () => {
+    const h = await homeWithMsg();
+    try {
+      const r = await runCliTty(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
+      expect(r.code).toBe(0);
+      expect(r.stdout).not.toContain("#u="); // 长串不进人眼终端 (pty 合流后全文皆无)
+      expect(r.stdout).toMatch(/分享链接 \(\d+\.\dKB\)/); // 提示行照常 (经 pty 合流)
+      expect(r.stdout).toContain("last-share-url.txt");
+      expect(await readFile(h.urlFile, "utf8")).toMatch(/^http:\/\/localhost:19999\/calc\/#u=.+\n$/); // URL 完整落盘 (SSOT)
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("落盘中途失败不毁上一次的好文件 (tmp+rename 原子性)", async () => {
+    const h = await homeWithMsg();
+    try {
+      await mkdir(dataDir(h.env.XDG_DATA_HOME), {recursive: true});
+      await writeFile(h.urlFile, "http://old/calc/#u=previous\n"); // 上一次的好文件
+      await mkdir(`${h.urlFile}.tmp`); // tmp 占位为目录 → writeFile 阶段即失败 (EISDIR)
+      const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toMatch(/^http:\/\/localhost:19999\/calc\/#u=/); // 非 TTY 恒打 URL (管道契约)
+      expect(r.stderr).toContain("落盘");
+      expect(await readFile(h.urlFile, "utf8")).toBe("http://old/calc/#u=previous\n"); // 旧文件逐字节不变
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("超阈 hash (>90KB): 保留警告且指向落盘文件 (复制以文件为准)", async () => {
+    const h = await emptyHome();
+    try {
+      // 日粒度同日同模型聚合为一条 → 用 多天×多模型 撑大 hash (2 天 × 6000 模型 ≈ 120KB);
+      // 天步长 25h — 恰 24h 在 DST fall-back 时区可塌缩进同一本地日
+      const now = Date.now();
+      const lines = [0, 1].flatMap((d) =>
+        Array.from({length: 6000}, (_, m) =>
+          claudeAssistant({msgId: `m${d}_${m}`, model: `claude-sonnet-5-${m}`, input: 1000 + m, ts: now - d * 90000000}),
+        ),
+      );
+      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, lines);
+      const r = await runCli(["--days", "7"], h.env);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toMatch(/^https:\/\/pricey-tokens\.lambda\.lc\/calc\/#u=\S+\n$/); // 非 TTY stdout 只有 URL
+      expect(r.stderr).toContain("警告: 分享 hash");
+      expect(r.stderr).toContain("复制以文件为准"); // 警告与新行为一致: 指向落盘文件
+      expect(r.stderr).toContain("--days 7"); // 缩窗建议保留
+      expect((await readFile(h.urlFile, "utf8")).length).toBeGreaterThan(90 * 1024); // 超阈 URL 完整落盘
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("落盘失败 (EISDIR): 降级回退 — 完整 URL 打印 stdout, stderr 含失败原因", async () => {
+    const h = await homeWithMsg();
+    try {
+      // 同名目录 → rename(tmp, 目录) EISDIR: 与权限/磁盘状态无关的确定性失败注入
+      await mkdir(h.urlFile, {recursive: true});
+      const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toMatch(/^http:\/\/localhost:19999\/calc\/#u=/); // 兜底不弱于旧行为
+      expect(r.stderr).toContain("落盘");
+      expect(r.stderr).toContain("EISDIR");
+      expect(r.stderr).not.toContain("分享链接 ("); // 降级分支不与成功分支消息串台
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("TTY 落盘失败 (EISDIR): 回退打印 URL — 兜底不弱于旧行为", async () => {
+    const h = await homeWithMsg();
+    try {
+      await mkdir(h.urlFile, {recursive: true});
+      const r = await runCliTty(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("#u="); // TTY 正常不打长 URL, 落盘失败时回退打印 (pty 合流)
+      expect(r.stdout).toContain("EISDIR");
+      expect(r.stdout).toContain("手动访问上方 URL"); // 回退分支的兜底指引
     } finally {
       await h.cleanup();
     }
@@ -161,11 +274,8 @@ describe("cli 数据出口", () => {
   });
 
   it("--harness 过滤: 只收集指定源 (端到端, harness 字段 = 源名)", async () => {
-    const h = await emptyHome();
+    const h = await homeWithMsg();
     try {
-      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
-        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 86400000}),
-      ]);
       const r = await runCli(["--json", "--days", "7", "--harness", "claude-code"], h.env);
       expect(r.code).toBe(0);
       const profile = JSON.parse(r.stdout);
@@ -178,11 +288,8 @@ describe("cli 数据出口", () => {
   });
 
   it("--upload 非 TTY 且无 --yes: 拒绝上传 exit 1 (预览已打印)", async () => {
-    const h = await emptyHome();
+    const h = await homeWithMsg();
     try {
-      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
-        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
-      ]);
       const r = await runCli(["--upload"], h.env); // 测试进程 stdin 非 TTY
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("将上传的完整内容");
@@ -237,11 +344,8 @@ describe("cli 输出分级 (--verbose)", () => {
   });
 
   it("无跳过无告警: 默认模式无压缩提示 (干净输出)", async () => {
-    const h = await emptyHome();
+    const h = await homeWithMsg();
     try {
-      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
-        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
-      ]);
       const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
       expect(r.code).toBe(0);
       expect(r.stderr).not.toContain("已隐藏");

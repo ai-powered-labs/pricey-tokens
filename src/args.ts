@@ -108,5 +108,6 @@ export const HELP_TEXT = `pricey-tokens — 本机 AI coding agent 用量收集�
   --version          显示版本
 
 隐私: 只聚合每模型每日的 token 四分类计数、会话/请求计数与 ctx 直方图桶计数,
-不读取任何会话内容; 用量账本只存本机 (~/.local/share/pricey-tokens/usage.db)。
+不读取任何会话内容; 用量数据只存本机 (~/.local/share/pricey-tokens/ 下的 usage.db
+与默认模式分享 URL 文件 last-share-url.txt)。
 详见 README "采集什么与不采集什么"。`;

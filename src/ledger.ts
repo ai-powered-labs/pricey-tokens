@@ -42,6 +42,7 @@ import type {HarnessId, ProfileDayV2, ProfileModelV2, RequestRow, TurnRow, Usage
 import {createSqlite, type SqliteRwDb, type SqliteStmt} from "./sqlite.js";
 import {CTX_BUCKET_COUNT, ctxBucketIndex, ctxEstimate, CTX_HIST_COLS, emptyCtxHist, emptyOutHist, MCTX_HIST_COLS, OUT_BUCKET_COUNT, outBucketIndex, OUT_HIST_COLS} from "./ctx.js";
 import {dayEndTs, dayStartTs, localDayKey} from "./day.js";
+import {dataDir} from "./discover.js";
 
 export const SCHEMA_VERSION = "5";
 
@@ -65,9 +66,9 @@ const placeholders = (n: number): string => Array.from({length: n}, () => "?").j
 // IN 子句分块上限 (SQLite 变量数保守界, 兼容旧版 999 限制)
 const SQL_CHUNK = 500;
 
-// 账本文件路径 (dataHome 下); dataHome = XDG_DATA_HOME 或 ~/.local/share
-function ledgerPath(dataHome: string): string {
-  return join(dataHome, "pricey-tokens", "usage.db");
+// 账本文件路径 (数据根下; 目录段名 SSOT 见 discover.dataDir)
+function ledgerPath(root: string): string {
+  return join(dataDir(root), "usage.db");
 }
 
 // day_stats 直方图独立列 (SSOT 生成, 勿手抄): ctx_gt*(9) + out_gt*(4) + mctx_gt*(9)

@@ -9,15 +9,15 @@ $ npx pricey-tokens
 
 探测本机 **opencode / claude-code / codex** 的用量数据, 把每次 API 请求的 token
 四分类 (输入 / 输出 / 缓存读 / 缓存写) 归并进**本机用量账本**, 聚合出日粒度画像,
-生成站点分享链接并在浏览器打开 — 直接看到"你的用量按 API 计价值多少钱、哪个
-订阅套餐更划算"。
+生成站点分享链接 (完整 URL 落盘本机文件, 不在终端刷屏) 并在浏览器打开 — 直接看到
+"你的用量按 API 计价值多少钱、哪个订阅套餐更划算"。
 
 ## 安装与使用
 
 零全局安装, 直接跑:
 
 ```console
-$ npx pricey-tokens                 # 默认: 收集近 30 天 → stderr 用量摘要 → 打开浏览器换算
+$ npx pricey-tokens                 # 默认: 收集近 30 天 → stderr 用量摘要 → URL 落盘 → 打开浏览器换算
 $ npx pricey-tokens --days 7        # 小窗口 (分享链接更短)
 $ npx pricey-tokens --days all      # 全量历史
 $ npx pricey-tokens --json          # ProfileV2 JSON 到 stdout (日粒度 + ctx 直方图)
@@ -25,6 +25,8 @@ $ npx pricey-tokens --upload        # 上传社区档案 (上传前完整预览,
 $ npx pricey-tokens --upload --share --yes   # 上传并打印分享 URL (脚本场景)
 $ npx pricey-tokens --harness opencode,claude-code   # 只收集指定源
 $ npx pricey-tokens --verbose       # 过程详情 (探测/跳过/对账/账本增量)
+$ npx pricey-tokens | pbcopy        # 管道场景: stdout 只有分享 URL (脚本直接取用)
+$ cat ~/.local/share/pricey-tokens/last-share-url.txt   # 最近一次分享 URL 恒落盘于此 (TTY 终端不刷长串)
 ```
 
 要求: node ≥ 22.5 或 bun (SQLite 运行时是账本硬需求: bun 内置 `bun:sqlite`,
@@ -50,8 +52,10 @@ node 内置 `node:sqlite` — 更老的 node 无法运行本 CLI)。
 默认命令的 stderr 是**结果向**的用量摘要 (窗口/模型总览、token 四分类、模型
 分布条形图、每日趋势 sparkline); 过程详情 (探测报告、跳过原因、对账差异、账本
 增量) 默认隐藏 — 存在跳过/告警时压缩为一行计数提示 (异常可见但不刷屏), 加
-`--verbose` 展开。stdout 纪律: 默认模式 stdout 只有分享 URL (可安全
-`npx pricey-tokens | pbcopy`), `--json` 模式 stdout 只有 JSON。
+`--verbose` 展开。stdout 纪律: 默认模式**非 TTY** (管道/重定向) stdout 只有分享
+URL (可安全 `npx pricey-tokens | pbcopy`); **TTY** (人看终端) 不打长 URL (刷屏
+且复制易截断), 完整 URL 落盘 `last-share-url.txt`, 落盘失败才回退打印;
+`--json` 模式 stdout 只有 JSON。
 
 ## 本机用量账本 (requests ledger)
 
@@ -59,6 +63,7 @@ node 内置 `node:sqlite` — 更老的 node 无法运行本 CLI)。
 
 ```
 ~/.local/share/pricey-tokens/usage.db      # XDG_DATA_HOME 优先
+~/.local/share/pricey-tokens/last-share-url.txt   # 默认模式最近一次分享 URL (一行完整, 免终端长 URL 刷屏/截断)
 ```
 
 - **归并幂等**: req_key 冲突时后值覆盖且仅在值变化时写 — 重采永不双计; claude
@@ -99,7 +104,9 @@ node 内置 `node:sqlite` — 更老的 node 无法运行本 CLI)。
 - 模型串与时间戳本身保留 (这是"用量"的必要构成)。分享链接 (`#u=…`) 与上传档案
   (ProfileV2) 含且仅含上述聚合数据; **上传含日粒度计数与 ctx/输出规模/会话最深
   上下文直方图桶计数** (无小时粒度 — 作息隐私面不上传)。
-- 默认模式生成的分享链接**完整携带**这些数据 (在 URL hash 里, 不经过服务器);
+- 默认模式生成的分享链接**完整携带**这些数据 (在 URL hash 里, 不经过服务器;
+  完整 URL 落盘 `last-share-url.txt`; 终端 (TTY) 不打印长 URL — 管道场景 stdout
+  仍输出 URL 供脚本取用, 落盘失败时回退打印);
   `--upload` 模式上传前会**原样打印将发送的全部内容**, 你确认后才发出。
 - 上传档案携带一个本地生成的随机 device key (`~/.config/pricey-tokens/device-key`),
   仅用于重复上传时覆盖你自己的旧档案, 不含身份信息。
@@ -166,7 +173,7 @@ $ pricey-tokens --upload --days 30
 
 ```console
 $ bun install
-$ bun test          # 135 个测试 (账本幂等/水位线/对账/迁移 / 三家解析器 / ctx+out 直方图契约 / session 归因 / hash golden / 参数 / CLI 编排 / 上传)
+$ bun test          # 166 个测试 (账本幂等/水位线/对账/迁移 / 三家解析器 / ctx+out 直方图契约 / session 归因 / hash golden / 参数 / CLI 编排 / 上传)
 $ bun run typecheck # TS 严格 (含 tests)
 $ bun run build     # tsc → dist/ (node ESM, bin shebang)
 ```

@@ -1,6 +1,7 @@
 // discover.ts — 本机 harness 数据源探测与枚举
 // 职责边界: 按各 harness 的约定数据位置**只做枚举** (存在性 + 文件清单), 不解析
-// 不收集 (摄取编排在 ingest.ts)。数据位置约定:
+// 不收集 (摄取编排在 ingest.ts); 另持有应用自身数据路径解析 (dataHome/dataDir —
+// XDG env 语义与 "pricey-tokens" 目录段名, 非枚举面)。数据位置约定:
 //   - opencode: $XDG_DATA_HOME/opencode/opencode*.db (缺省 ~/.local/share/opencode/)
 //     枚举数据目录下全部 opencode*.db — main/stable/local/fork 各通道安装各有独立
 //     库且互不共享会话, 全收防漏 (2026-09 本机实测活跃库在 opencode-stable.db);
@@ -20,6 +21,13 @@ export function dataHome(home: string): string {
   return process.env.XDG_DATA_HOME && process.env.XDG_DATA_HOME.startsWith("/")
     ? process.env.XDG_DATA_HOME
     : join(home, ".local", "share");
+}
+
+// 应用数据目录 (数据根下, 账本 usage.db 与 last-share-url.txt 等落盘产物共用);
+// "pricey-tokens" 段名在数据根域内单点持有 (config 根下的孪生字面量属 device-key
+// 契约)。root 为已解析的数据根 (env 语义归 dataHome, 勿传 homedir)
+export function dataDir(root: string): string {
+  return join(root, "pricey-tokens");
 }
 
 // 递归枚举 root 下匹配 filter 的文件 (排序稳定)

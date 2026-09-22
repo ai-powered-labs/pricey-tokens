@@ -3,14 +3,15 @@
 // 职责边界: 参数解析 (args) → 增量摄取 (ingest → ledger, 全历史水位线增量, 与窗口
 // 无关) → 账本窗口查询 → 按模式出口:
 //   - 默认: stderr 用量摘要 (report.renderSummary, 总览/模型分布/每日趋势) →
-//     日粒度记录 → 站点分享 hash → 打开浏览器 (CLI 的核心体验: 一条命令看到用量
-//     与换算结果; #u= 比特兼容契约不变)
+//     日粒度记录 → 站点分享 hash → URL 落盘 dataDir/last-share-url.txt + 打开
+//     浏览器 (CLI 的核心体验: 一条命令看到用量与换算结果; #u= 比特兼容契约不变)
 //   - --json: ProfileV2 JSON 到 stdout (day 粒度 + ctx 直方图)
 //   - --upload: 完整预览 payload (ProfileV2) → 确认 → POST → (--share 打印分享 URL)
 // 过程详情 (探测/跳过/对账/账本增量) 默认隐藏 — 压缩为单行计数提示 (异常可见不
 // 刷屏), --verbose 展开。stdout 纪律: --json 模式下 stdout 只有 JSON; 默认模式
-// stdout 只有分享 URL (摘要走 stderr, 保护 `| pbcopy` 类管道)。退出码: 0 成功 /
-// 1 可预期失败 (无数据/参数错/上传失败)。
+// 非 TTY (管道/重定向) stdout 只有分享 URL (保护 `| pbcopy` 类机读管道), TTY 不打
+// 长 URL (刷屏且复制有截断风险) — URL 落盘为 SSOT, 落盘失败回退打印。退出码: 0
+// 成功 / 1 可预期失败 (无数据/参数错/上传失败)。
 import {parseArgs, ArgsError, HELP_TEXT} from "./args.js";
 import {ingestAll} from "./ingest.js";
 import {Ledger} from "./ledger.js";
@@ -19,9 +20,11 @@ import {encodeShare, sharePayloadOf, buildShareUrl, HASH_WARN_BYTES} from "./sha
 import {previewText, confirmUpload, uploadProfile} from "./upload.js";
 import {loadOrCreateDeviceKey} from "./device-key.js";
 import {openUrl} from "./browser.js";
-import {dataHome} from "./discover.js";
+import {dataHome, dataDir} from "./discover.js";
 import {renderSummary} from "./report.js";
 import {createRequire} from "node:module";
+import {rename, writeFile} from "node:fs/promises";
+import {join} from "node:path";
 import {errMsg} from "./guards.js";
 import type {ProfileV2} from "./types.js";
 
@@ -34,6 +37,12 @@ function out(msg: string): void {
 function err(msg: string): void {
   process.stderr.write(msg + "\n");
 }
+
+// 人类可读大小 (KB 一位小数, 提示行展示用)
+const humanKB = (bytes: number): string => `${(bytes / 1024).toFixed(1)}KB`;
+
+// 路径的 home 前缀缩写 (~ 展开; 提示行展示用, 非 home 下原样返回)
+const shownPath = (home: string, p: string): string => (p.startsWith(home + "/") ? `~${p.slice(home.length)}` : p);
 
 async function main(): Promise<number> {
   // help/version 前置短路 (先于 parseArgs — 任何参数组合下 --help 都须能显示,
@@ -159,20 +168,50 @@ async function main(): Promise<number> {
     }
   }
 
-  // 默认出口收尾: 分享 hash + 打开浏览器 (--json/--upload 模式下不重复打开 —
-  // 详见 README 各模式说明)
+  // 默认出口收尾: 分享 hash → URL 落盘 last-share-url.txt + stdout 分流 + 打开
+  // 浏览器 (--json/--upload 模式下不重复打开 — 详见 README 各模式说明)
   if (defaultMode) {
     if (daily.length === 0) {
       err("\n提示: 窗口内用量全部落在窗口首日 00:00 到窗口起点之间 — 分享链接将不携带任何记录。");
     }
     const hash = encodeShare(sharePayloadOf(daily));
     const url = buildShareUrl(opts.site, hash);
+    const urlFile = join(dataDir(dataRoot), "last-share-url.txt");
+    const fileForShow = shownPath(home, urlFile);
+    let persisted = false;
+    try {
+      // temp+rename 原子落盘 (同 device-key 范式): 磁盘满中断不留半截 URL 顶掉上一次
+      // 的好文件 (半截文件被 cat 走比无文件更糟)
+      const tmp = `${urlFile}.tmp`;
+      await writeFile(tmp, url + "\n");
+      await rename(tmp, urlFile);
+      persisted = true;
+    } catch (e) {
+      err(`\n落盘分享 URL 失败 (${errMsg(e)})。`);
+    }
+    // stdout 分流: 非 TTY 只有 URL (机读管道契约, 详见头注); TTY 靠落盘, 失败回退打印
+    const isTTY = process.stdout.isTTY === true;
+    if (!isTTY || !persisted) out(url);
     if (hash.length > HASH_WARN_BYTES) {
-      err(`\n警告: 分享 hash ${hash.length} 字节 (> ${HASH_WARN_BYTES}), URL 过长可能被浏览器/终端截断。`);
+      err(`\n警告: 分享 hash ${hash.length} 字节 (> ${HASH_WARN_BYTES}), URL 过长可能被${isTTY && persisted ? "浏览器地址栏" : "浏览器/终端"}截断。`);
+      if (persisted) err(`完整 URL 已落盘 ${fileForShow}, 复制以文件为准。`);
       err("建议用 --days 7 缩小窗口后再生成分享链接。");
     }
-    out(url);
-    err("\n正在浏览器打开换算结果… (未自动打开时手动访问上方 URL)");
+    if (persisted) err(`\n分享链接 (${humanKB(Buffer.byteLength(url))}): ${fileForShow}`);
+    if (isTTY) {
+      if (persisted) {
+        // 提示行命令仅对可安全 $(cat …) 的形态给出 (win32 无 xdg-open; 路径含空格分词炸)
+        const opener = process.platform === "darwin" ? "open" : "xdg-open";
+        const cmdHint =
+          process.platform === "win32" || fileForShow.includes(" ")
+            ? `打开 ${fileForShow} 复制 URL`
+            : `可 ${opener} "$(cat ${fileForShow})" 或打开该文件复制 URL`;
+        err(`正在浏览器打开换算结果… (未自动打开时${cmdHint})`);
+      } else {
+        err("\n正在浏览器打开换算结果… (未自动打开时手动访问上方 URL)");
+      }
+    }
+    // openUrl 恒执行 (非 TTY 静默开浏览器是有意的 — 无人看提示, 动作本身仍发生)
     openUrl(url);
   }
   return exit;

@@ -36,6 +36,7 @@ export function parseArgs(rawArgv: string[]): Options {
     upload: false,
     share: false,
     yes: false,
+    verbose: false,
     days: 30,
     harnesses: [],
     api: DEFAULT_API,
@@ -51,6 +52,7 @@ export function parseArgs(rawArgv: string[]): Options {
     else if (arg === "--upload") opts.upload = true;
     else if (arg === "--share") opts.share = true;
     else if (arg === "--yes" || arg === "-y") opts.yes = true;
+    else if (arg === "--verbose") opts.verbose = true;
     else if (arg === "--days") parseDays(value());
     else if (arg === "--harness") parseHarnesses(value());
     else if (arg === "--api") opts.api = normalizeBase(value());
@@ -96,6 +98,7 @@ export const HELP_TEXT = `pricey-tokens — 本机 AI coding agent 用量收集�
   --upload           上传 ProfileV2 到社区档案 (上传前完整预览, 需确认)
   --share            上传后打印分享 URL (须与 --upload 同用)
   --yes              跳过上传交互确认 (非交互环境的显式授权)
+  --verbose          打印过程详情 (探测/跳过/对账/账本增量 — 排查问题时用)
   --days N|all       出口窗口天数 (默认 30; all = 全量; 摄取恒为全历史增量)
   --harness LIST       只收集指定源, 逗号分隔: opencode,claude-code,codex
   --api URL          上传 API base (默认 https://pricey-tokens.lambda.lc)

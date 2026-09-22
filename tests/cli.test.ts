@@ -85,7 +85,7 @@ describe("cli 数据出口", () => {
     }
   });
 
-  it("有数据: --json stdout 纯 JSON 可 parse (探测报告全在 stderr)", async () => {
+  it("有数据: --json stdout 纯 JSON 可 parse (过程详情默认隐藏, stderr 无探测报告)", async () => {
     const h = await emptyHome();
     try {
       await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
@@ -102,8 +102,9 @@ describe("cli 数据出口", () => {
       expect(m.in).toBe(100);
       expect(m.nReq).toBe(1);
       expect(m.ctxHist.reduce((a: number, b: number) => a + b, 0)).toBe(1); // Σhist==nReq
-      expect(r.stderr).toContain("[claude-code]");
-      expect(r.stderr).toContain("账本"); // 账本累计报告
+      expect(r.stderr).not.toContain("[claude-code]"); // 过程详情已隐藏
+      expect(r.stderr).not.toContain("账本:");
+      expect(r.stderr).not.toContain("用量摘要"); // 摘要是默认出口模式独有
     } finally {
       await h.cleanup();
     }
@@ -116,7 +117,7 @@ describe("cli 数据出口", () => {
         claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
       ]);
       const r1 = await runCli(["--json", "--days", "7"], h.env);
-      const r2 = await runCli(["--json", "--days", "7"], h.env);
+      const r2 = await runCli(["--json", "--verbose", "--days", "7"], h.env); // 增量详情走 verbose
       expect(r2.code).toBe(0);
       expect(r2.stderr).toContain("重收 0");
       expect(r2.stderr).toContain("+0");
@@ -186,6 +187,77 @@ describe("cli 数据出口", () => {
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("将上传的完整内容");
       expect(r.stderr).toContain("已取消上传");
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("cli 输出分级 (--verbose)", () => {
+  // claude 有数据 + codex 空 rollout (skipped 面) — 同时具备摘要与隐藏提示的触发条件
+  async function homeWithSkip() {
+    const h = await emptyHome();
+    await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
+      claudeAssistant({msgId: "m1", input: 1000, output: 100, ts: Date.now() - 3600000}),
+    ]);
+    await writeLines(`${h.home}/.codex/sessions/2026/09/22/rollout-empty.jsonl`, []);
+    return h;
+  }
+
+  it("默认模式: stderr 是用量摘要 + 跳过压缩提示, 无过程详情; stdout 仍只有 URL", async () => {
+    const h = await homeWithSkip();
+    try {
+      const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toMatch(/^http:\/\/localhost:19999\/calc\/#u=/); // stdout 纪律不变
+      expect(r.stderr).toContain("用量摘要"); // 结果向信息上位
+      expect(r.stderr).toContain("已隐藏"); // 异常可见但不刷屏
+      expect(r.stderr).toContain("--verbose");
+      expect(r.stderr).not.toContain("[skip]");
+      expect(r.stderr).not.toContain("[claude-code]");
+      expect(r.stderr).not.toContain("账本:");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("--verbose: 过程详情 (探测/跳过/账本增量) 回归 stderr", async () => {
+    const h = await homeWithSkip();
+    try {
+      const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/", "--verbose"], h.env);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toContain("[claude-code]");
+      expect(r.stderr).toContain("[skip]");
+      expect(r.stderr).toContain("账本:");
+      expect(r.stderr).not.toContain("已隐藏"); // 展开时不再压缩提示
+      expect(r.stderr).toContain("用量摘要"); // 摘要与 verbose 正交, 照常打印
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("无跳过无告警: 默认模式无压缩提示 (干净输出)", async () => {
+    const h = await emptyHome();
+    try {
+      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
+        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
+      ]);
+      const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
+      expect(r.code).toBe(0);
+      expect(r.stderr).not.toContain("已隐藏");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("--upload 模式: 有预览与压缩提示, 但无用量摘要 (摘要独占默认出口)", async () => {
+    const h = await homeWithSkip();
+    try {
+      const r = await runCli(["--upload", "--days", "7"], h.env); // 非 TTY 无 --yes → 预览后取消
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("将上传的完整内容");
+      expect(r.stderr).toContain("已隐藏"); // 跳过压缩提示照常
+      expect(r.stderr).not.toContain("用量摘要");
     } finally {
       await h.cleanup();
     }

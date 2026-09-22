@@ -17,13 +17,14 @@ $ npx pricey-tokens
 零全局安装, 直接跑:
 
 ```console
-$ npx pricey-tokens                 # 默认: 收集近 30 天 → 打开浏览器换算
+$ npx pricey-tokens                 # 默认: 收集近 30 天 → stderr 用量摘要 → 打开浏览器换算
 $ npx pricey-tokens --days 7        # 小窗口 (分享链接更短)
 $ npx pricey-tokens --days all      # 全量历史
 $ npx pricey-tokens --json          # ProfileV2 JSON 到 stdout (日粒度 + ctx 直方图)
 $ npx pricey-tokens --upload        # 上传社区档案 (上传前完整预览, 需确认)
 $ npx pricey-tokens --upload --share --yes   # 上传并打印分享 URL (脚本场景)
 $ npx pricey-tokens --harness opencode,claude-code   # 只收集指定源
+$ npx pricey-tokens --verbose       # 过程详情 (探测/跳过/对账/账本增量)
 ```
 
 要求: node ≥ 22.5 或 bun (SQLite 运行时是账本硬需求: bun 内置 `bun:sqlite`,
@@ -37,11 +38,20 @@ node 内置 `node:sqlite` — 更老的 node 无法运行本 CLI)。
 | `--upload` | 上传 ProfileV2 到社区档案 (先完整预览, 再确认) | 关 |
 | `--share` | 上传后打印分享 URL (须与 `--upload` 同用) | 关 |
 | `--yes` | 跳过上传交互确认 (非交互环境的显式授权) | 关 |
+| `--verbose` | 打印过程详情 (探测/跳过/对账/账本增量 — 排查问题时用) | 关 |
 | `--days N\|all` | 出口窗口 (天); `all` = 全量历史; 摄取恒为全历史增量 | 30 |
 | `--harness LIST` | 只收集指定源: `opencode,claude-code,codex` 逗号分隔 | 全部 |
 | `--api URL` | 上传 API base | `https://pricey-tokens.lambda.lc` |
 | `--site URL` | 分享站点 base (本地开发 `http://localhost:PORT/calc/`) | `https://pricey-tokens.lambda.lc/calc/` |
 | `--help` / `--version` | 帮助 / 版本 | — |
+
+### 输出分级
+
+默认命令的 stderr 是**结果向**的用量摘要 (窗口/模型总览、token 四分类、模型
+分布条形图、每日趋势 sparkline); 过程详情 (探测报告、跳过原因、对账差异、账本
+增量) 默认隐藏 — 存在跳过/告警时压缩为一行计数提示 (异常可见但不刷屏), 加
+`--verbose` 展开。stdout 纪律: 默认模式 stdout 只有分享 URL (可安全
+`npx pricey-tokens | pbcopy`), `--json` 模式 stdout 只有 JSON。
 
 ## 本机用量账本 (requests ledger)
 
@@ -60,8 +70,9 @@ node 内置 `node:sqlite` — 更老的 node 无法运行本 CLI)。
   错误标记行; codex 的错误请求不产生 token 事件。**已知偏差**: 计费了但中途
   失败的流被排除 ⇒ 额度消耗略低估, 有意为之。
 - **对账**: opencode 的 session 汇总表是源的权威汇总, 每次摄取后对变动过的会话
-  对账 (账本 rollup vs 源汇总), 差异打 stderr 告警但不失败 — 用于发现源裁剪
-  历史 / 解析漂移; 上条成功过滤剔除的行也会表现为预期内差异。
+  对账 (账本 rollup vs 源汇总), 差异进告警面但不失败 — 用于发现源裁剪
+  历史 / 解析漂移; 上条成功过滤剔除的行也会表现为预期内差异。告警默认压缩为
+  一行计数提示, `--verbose` 展开明细。
 - **request 粒度永不出本机** (隐私 + 体量)。账本可随时删除, 下次运行自动全量重建。
 - 从账本物化 `day_stats` (日×模型聚合: 四分类 + 请求/轮次/工具调用计数 + 三张
   直方图 — ctx / 输出规模 / 会话最深上下文) 与 `session_stats` (会话级: 起止 /

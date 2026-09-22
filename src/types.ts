@@ -100,6 +100,7 @@ export interface Options {
   upload: boolean;
   share: boolean;
   yes: boolean;
+  verbose: boolean; // 过程详情 (探测/跳过/对账/账本增量) — 默认压缩隐藏
   days: number | "all"; // all = 全量; 数字 ≥ 1
   harnesses: HarnessId[]; // 空数组 = 全部源
   api: string; // 上传 API base (无尾斜杠)

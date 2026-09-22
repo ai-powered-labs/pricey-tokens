@@ -5,13 +5,14 @@ import {describe, expect, it} from "bun:test";
 import {parseArgs, ArgsError, DEFAULT_API, DEFAULT_SITE} from "../src/args.js";
 
 describe("parseArgs 默认值", () => {
-  it("空参数 → 全默认", () => {
+  it("空参数 → 全默认 (verbose 关 — 过程详情默认隐藏)", () => {
     const o = parseArgs([]);
     expect(o).toEqual({
       json: false,
       upload: false,
       share: false,
       yes: false,
+      verbose: false,
       days: 30,
       harnesses: [],
       api: DEFAULT_API,
@@ -26,6 +27,11 @@ describe("parseArgs 旗标与带值参数", () => {
   it("--json --upload --share --yes 组合", () => {
     const o = parseArgs(["--json", "--upload", "--share", "--yes"]);
     expect(o.json && o.upload && o.share && o.yes).toBe(true);
+  });
+
+  it("--verbose 布尔旗标 (normalizeEquals 拆开 --verbose=true 会落未知参数, 不支持 = 形态)", () => {
+    expect(parseArgs(["--verbose"]).verbose).toBe(true);
+    expect(parseArgs(["--json", "--verbose"]).verbose).toBe(true);
   });
 
   it("--days 7 / --days=all / --days all", () => {

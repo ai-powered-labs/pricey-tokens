@@ -2,12 +2,15 @@
 // cli.ts — pricey-tokens CLI 入口与三种出口模式的编排
 // 职责边界: 参数解析 (args) → 增量摄取 (ingest → ledger, 全历史水位线增量, 与窗口
 // 无关) → 账本窗口查询 → 按模式出口:
-//   - 默认: 日粒度记录 → 站点分享 hash → 打开浏览器 (CLI 的核心体验: 一条命令看到
-//     换算结果; #u= 比特兼容契约不变)
+//   - 默认: stderr 用量摘要 (report.renderSummary, 总览/模型分布/每日趋势) →
+//     日粒度记录 → 站点分享 hash → 打开浏览器 (CLI 的核心体验: 一条命令看到用量
+//     与换算结果; #u= 比特兼容契约不变)
 //   - --json: ProfileV2 JSON 到 stdout (day 粒度 + ctx 直方图)
 //   - --upload: 完整预览 payload (ProfileV2) → 确认 → POST → (--share 打印分享 URL)
-// stdout 纪律: --json 模式下 stdout 只有 JSON; 人类可读摘要/警告一律 stderr 或
-// 非 json 模式的 stdout。退出码: 0 成功 / 1 可预期失败 (无数据/参数错/上传失败)。
+// 过程详情 (探测/跳过/对账/账本增量) 默认隐藏 — 压缩为单行计数提示 (异常可见不
+// 刷屏), --verbose 展开。stdout 纪律: --json 模式下 stdout 只有 JSON; 默认模式
+// stdout 只有分享 URL (摘要走 stderr, 保护 `| pbcopy` 类管道)。退出码: 0 成功 /
+// 1 可预期失败 (无数据/参数错/上传失败)。
 import {parseArgs, ArgsError, HELP_TEXT} from "./args.js";
 import {ingestAll} from "./ingest.js";
 import {Ledger} from "./ledger.js";
@@ -17,6 +20,7 @@ import {previewText, confirmUpload, uploadProfile} from "./upload.js";
 import {loadOrCreateDeviceKey} from "./device-key.js";
 import {openUrl} from "./browser.js";
 import {dataHome} from "./discover.js";
+import {renderSummary} from "./report.js";
 import {createRequire} from "node:module";
 import {errMsg} from "./guards.js";
 import type {ProfileV2} from "./types.js";
@@ -82,26 +86,40 @@ async function main(): Promise<number> {
     }
   }
 
-  // 探测报告 (stderr — 保持 --json 的 stdout 纯净)
+  // 探测报告 (stderr — 保持 --json 的 stdout 纯净): 过程详情默认隐藏, --verbose
+  // 展开; 默认仅在有跳过/告警时留一行计数提示 (异常可见但不刷屏)
+  const verr = (msg: string): void => {
+    if (opts.verbose) err(msg);
+  };
   for (const s of report.statuses) {
-    err(`[${s.harness}] ${s.found ? "✓" : "✗ 未发现"} ${s.detail}`);
+    verr(`[${s.harness}] ${s.found ? "✓" : "✗ 未发现"} ${s.detail}`);
   }
-  for (const s of report.skipped) err(`[skip] ${s}`);
-  for (const w of report.warnings) err(w);
-  err(`\n账本: ${report.total} 请求累计 (本次新增 +${report.inserted})`);
+  for (const s of report.skipped) verr(`[skip] ${s}`);
+  for (const w of report.warnings) verr(w);
+  verr(`\n账本: ${report.total} 请求累计 (本次新增 +${report.inserted})`);
+  const hiddenCount = report.skipped.length + report.warnings.length;
+  if (!opts.verbose && hiddenCount > 0) {
+    err(`提示: ${hiddenCount} 条过程信息 (跳过 ${report.skipped.length}, 告警 ${report.warnings.length}) 已隐藏, 加 --verbose 查看`);
+  }
 
   if (days.length === 0) {
     // 空数据判定只用 day 对齐窗口 (ts 精确窗口是其子集 — 窗口首日 00:00 到
     // sinceMs 间的用量只可能出现在 days 而不在 daily, 杂交判定会误报空)
     err(`\n窗口内 (${opts.days === "all" ? "全量" : `${opts.days} 天`}) 未收集到任何用量记录。`);
-    err("若你确实在用这些工具, 检查数据目录权限或提 issue: https://github.com/ai-powered-labs/pricey-tokens");
+    err("若你确实在用这些工具, 加 --verbose 查看各源探测详情; 仍有问题检查数据目录权限或提 issue: https://github.com/ai-powered-labs/pricey-tokens");
     return 1;
   }
 
-  const modelCount = new Set(days.flatMap((d) => d.models.map((m) => m.id))).size;
-  const firstDay = days[0]!.day;
-  const lastDay = days[days.length - 1]!.day;
-  err(`聚合: ${modelCount} 个模型, ${days.length} 天 (${firstDay} ~ ${lastDay}), harness=${harness}`);
+  // 默认出口模式 (无 --json 无 --upload): stderr 用量摘要 → 分享 hash → 打开浏览器;
+  // 摘要与浏览器两处共用此谓词, 新增出口模式时只改这一处
+  const defaultMode = !opts.json && !opts.upload;
+  if (defaultMode) {
+    err("\n" + renderSummary({
+      days,
+      windowLabel: opts.days === "all" ? "全量" : `近 ${opts.days} 天`,
+      harnessLabel: harness === "mixed" ? "多源混合" : harness,
+    }));
+  }
 
   let exit = 0;
 
@@ -141,9 +159,9 @@ async function main(): Promise<number> {
     }
   }
 
-  // 默认出口 (无 --json 无 --upload): 分享 hash + 打开浏览器
-  // (--json/--upload 模式下不重复打开 — 详见 README 各模式说明)
-  if (!opts.json && !opts.upload) {
+  // 默认出口收尾: 分享 hash + 打开浏览器 (--json/--upload 模式下不重复打开 —
+  // 详见 README 各模式说明)
+  if (defaultMode) {
     if (daily.length === 0) {
       err("\n提示: 窗口内用量全部落在窗口首日 00:00 到窗口起点之间 — 分享链接将不携带任何记录。");
     }

@@ -1,0 +1,6 @@
+# bunfig.toml — bun test 全局配置
+# timeout 放宽到 30s: cli 测试逐条 spawn 子进程, 首跑冷编译 (bun 起 TS 源码 +
+# 依赖图) 在冷缓存/高负载机器可超默认 5s — 实测被误杀为 exit 143 flake;
+# 放宽只影响挂起判定的等待上限, 不拖慢正常路径 (全部用例实测 ~2s 收敛)。
+[test]
+timeout = 30000

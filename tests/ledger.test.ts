@@ -14,11 +14,18 @@ import {join} from "node:path";
 import type {RequestRow} from "../src/types.js";
 import {Ledger} from "../src/ledger.js";
 import {localDayKey} from "../src/day.js";
+import {CTX_HIST_COLS, OUT_HIST_COLS, MCTX_HIST_COLS} from "../src/ctx.js";
 
 async function makeDataHome(): Promise<{home: string; cleanup: () => Promise<void>}> {
   const home = await mkdtemp(join(tmpdir(), "pt-ledger-"));
   return {home, cleanup: () => rm(home, {recursive: true, force: true})};
 }
+
+// noUncheckedIndexedAccess 下 Record 索引含 undefined — 桶列求和的类型安全收口
+// (列名恒来自 src/ctx.ts 的 *_HIST_COLS SSOT, 不在测试里手抄; 行即 readDayStats
+// 原始形态 Record<string, unknown>, 数值化集中在此一处, 调用点零 cast)
+const sumCols = (r: Record<string, unknown>, cols: readonly string[]): number =>
+  cols.reduce((a, k) => a + Number(r[k] ?? 0), 0);
 
 const T = new Date(2026, 8, 22, 10, 30).getTime(); // 2026-09-22 10:30 本地
 const row = (o: Partial<RequestRow> & {reqKey: string; ts: number}): RequestRow => ({
@@ -429,7 +436,7 @@ describe("session_stats 物化 (主模型归因 + 轮次 join)", () => {
     expect(d2After.n_sess).toBe(1);
     expect(d2After.n_req).toBe(1);
     // 全局: 会话恰一增量 (两日直方图总和恒 1)
-    const total = stats.reduce((a, r) => a + (r as {[k: string]: number})["mctx_0_32k"] + (r as {[k: string]: number})["mctx_32k_64k"] + (r as {[k: string]: number})["mctx_64k_128k"] + (r as {[k: string]: number})["mctx_128k_200k"] + (r as {[k: string]: number})["mctx_200k_256k"] + (r as {[k: string]: number})["mctx_256k_512k"] + (r as {[k: string]: number})["mctx_512k_1m"] + (r as {[k: string]: number})["mctx_1m_2m"] + (r as {[k: string]: number})["mctx_2m_inf"], 0);
+    const total = stats.reduce((a, r) => a + sumCols(r, MCTX_HIST_COLS), 0);
     expect(total).toBe(1);
     l.close();
   });
@@ -557,13 +564,13 @@ describe("v2 → v3 迁移 (自动回填)", () => {
     expect(sess.every((s) => s.n_turns === 0 && s.n_tools === 0)).toBe(true); // 存量无源恒 0
     // day_stats 宽列 (v4): 直方图独立列从 requests 现算真实; 旧 TEXT 复合列不复存在
     const stats = await readDayStats(home);
-    const m = stats[0] as unknown as Record<string, number>;
+    const m = stats[0]!;
     expect(m["n_req"]).toBe(2);
-    expect(m["ctx_0_32k"] + m["ctx_32k_64k"] + m["ctx_64k_128k"] + m["ctx_128k_200k"] + m["ctx_200k_256k"] + m["ctx_256k_512k"] + m["ctx_512k_1m"] + m["ctx_1m_2m"] + m["ctx_2m_inf"]).toBe(2); // ΣctxHist==nReq
-    expect(m["out_0_32k"] + m["out_32k_64k"] + m["out_64k_128k"] + m["out_128k_inf"]).toBe(2); // ΣoutHist==nReq
+    expect(sumCols(m, CTX_HIST_COLS)).toBe(2); // ΣctxHist==nReq
+    expect(sumCols(m, OUT_HIST_COLS)).toBe(2); // ΣoutHist==nReq
     expect(m["n_tools"]).toBe(0); // 存量行 n_tools=0
     expect(m["n_turns"]).toBe(0); // 无 turn_events
-    expect(m["mctx_0_32k"] + m["mctx_32k_64k"] + m["mctx_64k_128k"] + m["mctx_128k_200k"] + m["mctx_200k_256k"] + m["mctx_256k_512k"] + m["mctx_512k_1m"] + m["mctx_1m_2m"] + m["mctx_2m_inf"]).toBe(2); // 会话数真实回填
+    expect(sumCols(m, MCTX_HIST_COLS)).toBe(2); // 会话数真实回填
     expect("ctx_hist" in m).toBe(false); // 旧复合列已消亡 (DROP 重建)
     l.close();
     // 二开: 版本 5 直通, 数据不变

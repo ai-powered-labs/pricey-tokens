@@ -148,8 +148,7 @@ describe("day_stats 重算", () => {
     const l = await Ledger.open(home);
     l.insertRequests([row({reqKey: "a", ts: T})]);
     l.recomputeDays([localDayKey(T)]);
-    // 直接改写 day_stats 模拟外部损坏 (SqliteRwDb 不外露 — 用 Ledger 内部无法触达,
-    // 以 build 形态验证: 通过 recompute 后人为再改) — 用同一 db 文件旁路写入
+    // 关账后经 createSqlite 旁路改写 day_stats, 模拟外部落盘损坏
     l.close();
     const {createSqlite} = await import("../src/sqlite.js");
     const db = await createSqlite(join(home, "pricey-tokens", "usage.db"));

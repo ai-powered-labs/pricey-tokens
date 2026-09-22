@@ -50,11 +50,20 @@ export interface SessRef {
 
 const sessRefKey = (s: SessRef): string => `${s.harness} ${s.sessKey}`;
 
+// sessRefKey 逆变换 (harness 恒无空格, 首空格即分隔符) — 键格式契约单点
+const parseSessRefKey = (k: string): SessRef => {
+  const sp = k.indexOf(" ");
+  return {harness: k.slice(0, sp) as HarnessId, sessKey: k.slice(sp + 1)};
+};
+
+// IN 占位符列表 (?,?,,…) — 各分块/过滤查询统一拼写
+const placeholders = (n: number): string => Array.from({length: n}, () => "?").join(",");
+
 // IN 子句分块上限 (SQLite 变量数保守界, 兼容旧版 999 限制)
 const SQL_CHUNK = 500;
 
 // 账本文件路径 (dataHome 下); dataHome = XDG_DATA_HOME 或 ~/.local/share
-export function ledgerPath(dataHome: string): string {
+function ledgerPath(dataHome: string): string {
   return join(dataHome, "pricey-tokens", "usage.db");
 }
 
@@ -135,6 +144,21 @@ function newAcc(ts: number): DayModelAcc {
   return {inT: 0, outT: 0, crT: 0, cwT: 0, nReq: 0, nTools: 0, nTurns: 0, lastTs: ts, sesses: new Set(), ctxHist: emptyCtxHist(), outHist: emptyOutHist(), maxCtxHist: emptyCtxHist()};
 }
 
+// byDay→byModel→acc 两级 get-or-create (聚合核心与会话归并共用)
+function accFor(byDay: Map<string, Map<string, DayModelAcc>>, day: string, model: string, initTs: number): DayModelAcc {
+  let byModel = byDay.get(day);
+  if (!byModel) {
+    byModel = new Map();
+    byDay.set(day, byModel);
+  }
+  let acc = byModel.get(model);
+  if (!acc) {
+    acc = newAcc(initTs);
+    byModel.set(model, acc);
+  }
+  return acc;
+}
+
 // 直方图 JSON 落盘解析 (发射守卫): 形状 + 可选 Σ 校验 — day_stats 被外部改写的
 // 静默损坏在此拦截 (构造侧天然满足不变量)
 function parseHist(text: string, expectLen: number, nReq: number | null, what: string, where: string): number[] {
@@ -152,17 +176,8 @@ function groupRequestRows(rows: ReadonlyArray<Record<string, unknown>>): Map<str
   for (const r of rows) {
     const ts = r.ts as number;
     const day = localDayKey(ts);
-    let byModel = byDay.get(day);
-    if (!byModel) {
-      byModel = new Map();
-      byDay.set(day, byModel);
-    }
     const model = String(r.model);
-    let acc = byModel.get(model);
-    if (!acc) {
-      acc = newAcc(ts);
-      byDay.get(day)!.set(model, acc);
-    }
+    const acc = accFor(byDay, day, model, ts);
     const inT = r.in_t as number;
     const outT = r.out_t as number;
     const crT = r.cr_t as number;
@@ -191,16 +206,7 @@ function mergeSessionContrib(
   nTurns: number,
   maxCtx: number,
 ): void {
-  let byModel = byDay.get(day);
-  if (!byModel) {
-    byModel = new Map();
-    byDay.set(day, byModel);
-  }
-  let acc = byModel.get(model);
-  if (!acc) {
-    acc = newAcc(0);
-    byModel.set(model, acc);
-  }
+  const acc = accFor(byDay, day, model, 0);
   acc.nTurns += nTurns;
   acc.maxCtxHist[ctxBucketIndex(maxCtx)]! += 1;
 }
@@ -289,8 +295,8 @@ export class Ledger {
       db.exec("ALTER TABLE day_stats ADD COLUMN n_tools INTEGER NOT NULL DEFAULT 0");
       db.exec("ALTER TABLE day_stats ADD COLUMN max_ctx_hist TEXT NOT NULL DEFAULT '[]'");
       const ledger = new Ledger(db);
-      const pairs = db.prepare("SELECT DISTINCT harness, sess_key AS s FROM requests").all()
-        .map((r) => ({harness: r.harness as HarnessId, sessKey: String(r.s)}));
+      const pairs = db.prepare("SELECT DISTINCT harness, sess_key FROM requests").all()
+        .map((r) => ({harness: r.harness as HarnessId, sessKey: String(r.sess_key)}));
       ledger.recomputeSessions(pairs);
       const days = db.prepare("SELECT DISTINCT day FROM day_stats").all().map((r) => String(r.day));
       ledger.recomputeDays(days);
@@ -320,8 +326,10 @@ export class Ledger {
   }
 
   // 事务/嵌套样板单点 (SAVEPOINT 语义: 外层 = 事务, 内层 = 保存点; ROLLBACK 纪律
-  // 不逐处手抄; v2 迁移在显式事务内调用重算方法即自然嵌套)
-  private tx(fn: () => void): void {
+  // 不逐处手抄; v2 迁移在显式事务内调用重算方法即自然嵌套)。公开为摄取编排的单
+  // 事务包裹: "归并 + 重算" 收进单事务 — 崩溃整批回滚 → 水位线未推进 → 重扫全量
+  // 重做 (幂等), 消除多事务批内的中途断裂面 (无轮次会话的同值重放不自愈形态)。
+  runInTx(fn: () => void): void {
     const sp = `sp_${this.txDepth}`;
     this.txDepth += 1;
     this.db.exec(`SAVEPOINT ${sp}`);
@@ -337,13 +345,6 @@ export class Ledger {
     }
   }
 
-  /** 单事务包裹一批写操作 (SAVEPOINT 嵌套: 外层=事务, 内层=保存点)。摄取编排把
-   * "归并 + 重算" 收进单事务 — 崩溃整批回滚 → 水位线未推进 → 重扫全量重做
-   * (幂等); 多事务批内的中途断裂面 (无轮次会话的同值重放不自愈形态) 由此消除。 */
-  runInTx(fn: () => void): void {
-    this.tx(fn);
-  }
-
   // 幂等归并一批请求行; 返回 {changed, days, sessions}:
   //   changed = 实际落账变更行数 (同值重放 = 0 — 不双计的锚点; claude 流式终值
   //   覆盖计 1)。变化判定在 TS 侧 (PK 点查旧行, 首跑空表全 miss 零代价)。
@@ -357,7 +358,7 @@ export class Ledger {
     const days = new Set<string>();
     const sessKeys = new Set<string>();
     let changed = 0;
-    this.tx(() => {
+    this.runInTx(() => {
       for (const r of rows) {
         const prev = this.selectRow.all(r.harness, r.reqKey)[0];
         if (prev === undefined) {
@@ -378,10 +379,7 @@ export class Ledger {
         changed += 1;
       }
     });
-    const sessions = [...sessKeys].map((k) => {
-      const sp = k.indexOf(" ");
-      return {harness: k.slice(0, sp) as HarnessId, sessKey: k.slice(sp + 1)};
-    });
+    const sessions = [...sessKeys].map(parseSessRefKey);
     return {changed, days, sessions};
   }
 
@@ -391,16 +389,13 @@ export class Ledger {
   insertTurns(rows: readonly TurnRow[]): SessRef[] {
     if (rows.length === 0) return [];
     const sessKeys = new Set<string>();
-    this.tx(() => {
+    this.runInTx(() => {
       for (const r of rows) {
         this.insertTurn.run(r.harness, r.turnKey, r.sessKey);
         sessKeys.add(sessRefKey({harness: r.harness, sessKey: r.sessKey}));
       }
     });
-    return [...sessKeys].map((k) => {
-      const sp = k.indexOf(" ");
-      return {harness: k.slice(0, sp) as HarnessId, sessKey: k.slice(sp + 1)};
-    });
+    return [...sessKeys].map(parseSessRefKey);
   }
 
   // 单会话重算内核: requests (ORDER BY ts, req_key — 主模型并列取后到者的确定性
@@ -448,7 +443,7 @@ export class Ledger {
       (harness, sess_key, first_ts, last_ts, day, model, n_turns, n_tools, in_t, out_t, cr_t, cw_t, max_ctx)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     const oldDayStmt = this.db.prepare("SELECT day FROM session_stats WHERE harness = ? AND sess_key = ?");
-    this.tx(() => {
+    this.runInTx(() => {
       for (const s of uniq.values()) {
         const old = oldDayStmt.all(s.harness, s.sessKey)[0];
         if (old !== undefined) days.add(String(old.day));
@@ -480,7 +475,7 @@ export class Ledger {
     // 会话归因贡献 (受影响日上的全部 session_stats 行)
     for (let i = 0; i < daySet.length; i += SQL_CHUNK) {
       const win = daySet.slice(i, i + SQL_CHUNK);
-      const sessRows = this.db.prepare(`SELECT day, model, n_turns, max_ctx FROM session_stats WHERE day IN (${win.map(() => "?").join(",")})`).all(...win);
+      const sessRows = this.db.prepare(`SELECT day, model, n_turns, max_ctx FROM session_stats WHERE day IN (${placeholders(win.length)})`).all(...win);
       for (const r of sessRows) {
         mergeSessionContrib(grouped, String(r.day), String(r.model), r.n_turns as number, r.max_ctx as number);
       }
@@ -489,7 +484,7 @@ export class Ledger {
     const insDay = this.db.prepare(`INSERT INTO day_stats
       (day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist, out_hist, n_turns, n_tools, max_ctx_hist)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-    this.tx(() => {
+    this.runInTx(() => {
       for (const d of daySet) {
         delDay.run(d);
         const byModel = grouped.get(d);
@@ -510,15 +505,14 @@ export class Ledger {
 
   private harnessFilter(harnesses: readonly HarnessId[]): string {
     if (harnesses.length === 0) return "";
-    return `AND harness IN (${harnesses.map(() => "?").join(",")})`;
+    return `AND harness IN (${placeholders(harnesses.length)})`;
   }
 
   // 聚合核心的喂入 SQL 投影 SSOT (列清单改动只此一处 — 分享/day_stats 重算/
   // ProfileV2 过滤全部路径共用; maxTs 缺省 = 只设下界)
   private requestsSince(minTs: number, harnesses: readonly HarnessId[], maxTs?: number): Array<Record<string, unknown>> {
     const upper = maxTs === undefined ? "" : " AND ts < ?";
-    const rows = this.db.prepare(`SELECT model, sess_key, in_t, out_t, cr_t, cw_t, ts, n_tools FROM requests WHERE ts >= ?${upper} ${this.harnessFilter(harnesses)}`).all(...(maxTs === undefined ? [minTs] : [minTs, maxTs]), ...harnesses);
-    return rows;
+    return this.db.prepare(`SELECT model, sess_key, in_t, out_t, cr_t, cw_t, ts, n_tools FROM requests WHERE ts >= ?${upper} ${this.harnessFilter(harnesses)}`).all(...(maxTs === undefined ? [minTs] : [minTs, maxTs]), ...harnesses);
   }
 
   // 分享日记录: ts 精确窗口 → (本地日, model) 聚合 (共用聚合核心, ts 取组内最大
@@ -540,9 +534,10 @@ export class Ledger {
   // 出口守卫 (ΣctxHist==nReq / ΣoutHist==nReq 逐行, ΣmaxCtxHist≤ΣnSess 按日聚合)。
   profileDays(sinceDay: string | null, harnesses: readonly HarnessId[]): ProfileDayV2[] {
     if (harnesses.length === 0) {
-      const rows = sinceDay === null
-        ? this.db.prepare("SELECT day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist, out_hist, n_turns, n_tools, max_ctx_hist FROM day_stats ORDER BY day").all()
-        : this.db.prepare("SELECT day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist, out_hist, n_turns, n_tools, max_ctx_hist FROM day_stats WHERE day >= ? ORDER BY day").all(sinceDay);
+      // 列清单是冻结发射面 — 谓词插值保持单份 (与 requestsSince 同惯用法)
+      const pred = sinceDay === null ? "" : " WHERE day >= ?";
+      const rows = this.db.prepare(`SELECT day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist, out_hist, n_turns, n_tools, max_ctx_hist FROM day_stats${pred} ORDER BY day`)
+        .all(...(sinceDay === null ? [] : [sinceDay]));
       const byDay = new Map<string, ProfileModelV2[]>();
       for (const r of rows) {
         const day = String(r.day);
@@ -574,9 +569,9 @@ export class Ledger {
     const grouped = groupRequestRows(this.requestsSince(sinceTs, harnesses));
     // 会话归因贡献 (harness 过滤口径; day 对齐下界 — 会话 last_ts 早于窗口首日的
     // 不进窗口, 与请求侧 dayStartTs 同界)
-    const sessRows = sinceDay === null
-      ? this.db.prepare(`SELECT day, model, n_turns, max_ctx FROM session_stats WHERE harness IN (${harnesses.map(() => "?").join(",")})`).all(...harnesses)
-      : this.db.prepare(`SELECT day, model, n_turns, max_ctx FROM session_stats WHERE day >= ? AND harness IN (${harnesses.map(() => "?").join(",")})`).all(sinceDay, ...harnesses);
+    const pred = sinceDay === null ? "" : "day >= ? AND ";
+    const sessRows = this.db.prepare(`SELECT day, model, n_turns, max_ctx FROM session_stats WHERE ${pred}harness IN (${placeholders(harnesses.length)})`)
+      .all(...(sinceDay === null ? [] : [sinceDay]), ...harnesses);
     for (const r of sessRows) {
       mergeSessionContrib(grouped, String(r.day), String(r.model), r.n_turns as number, r.max_ctx as number);
     }
@@ -599,10 +594,11 @@ export class Ledger {
   sessionRollups(harness: HarnessId, sessKeys: readonly string[]): Map<string, SessionRollup[]> {
     const rollups = new Map<string, SessionRollup[]>();
     if (sessKeys.length === 0) return rollups;
-    const stmt = this.db.prepare(`SELECT sess_key, model, SUM(in_t) AS in_t, SUM(out_t) AS out_t, SUM(cr_t) AS cr_t, SUM(cw_t) AS cw_t
-      FROM requests WHERE harness = ? AND sess_key IN (${Array.from({length: Math.min(SQL_CHUNK, sessKeys.length)}, () => "?").join(",")}) GROUP BY sess_key, model`);
     for (let i = 0; i < sessKeys.length; i += SQL_CHUNK) {
-      for (const r of stmt.all(harness, ...sessKeys.slice(i, i + SQL_CHUNK))) {
+      const win = sessKeys.slice(i, i + SQL_CHUNK);
+      const stmt = this.db.prepare(`SELECT sess_key, model, SUM(in_t) AS in_t, SUM(out_t) AS out_t, SUM(cr_t) AS cr_t, SUM(cw_t) AS cw_t
+        FROM requests WHERE harness = ? AND sess_key IN (${placeholders(win.length)}) GROUP BY sess_key, model`);
+      for (const r of stmt.all(harness, ...win)) {
         const sess = String(r.sess_key);
         let list = rollups.get(sess);
         if (!list) {

@@ -24,7 +24,7 @@ import {findClaudeFiles, findCodexFiles, findOpencodeDbs, notFoundDetail} from "
 import {collectClaudeRequests} from "./collectors/claude.js";
 import {collectCodexRequests} from "./collectors/codex.js";
 import {collectOpencodeRequests, opencodeSessionSummaries} from "./collectors/opencode.js";
-import type {Ledger, SessRef} from "./ledger.js";
+import type {Ledger} from "./ledger.js";
 
 export interface IngestStatus {
   harness: HarnessId;

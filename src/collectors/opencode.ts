@@ -28,6 +28,7 @@
 import {basename} from "node:path";
 import type {RequestRow, TurnRow} from "../types.js";
 import {openSqlite, type SqliteDb} from "../sqlite.js";
+import {posNum} from "../guards.js";
 
 const CHUNK_ROWID = 20000; // 分窗扫描窗口 (内存有界; rowid btree 范围查询无翻页代价)
 
@@ -37,8 +38,8 @@ export function epochMs(v: unknown): number | null {
   return v > 1e11 ? v : v * 1000;
 }
 
-// cell 正有限数守卫 (与站点侧同款三条件; ±Inf/负值/缺失按 0)
-const cell = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+// cell 正有限数守卫 = guards.posNum (与站点侧同款三条件; ±Inf/负值/缺失按 0)
+const cell = posNum;
 
 export interface OcScanResult {
   rows: RequestRow[];

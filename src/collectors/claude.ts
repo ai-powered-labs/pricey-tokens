@@ -98,7 +98,7 @@ export async function collectClaudeRequests(path: string): Promise<{rows: Reques
       outT,
       crT,
       cwT,
-      nTools: msg ? countToolUse(msg.content) : 0,
+      nTools: countToolUse(msg?.content),
     });
   }
   return {rows: [...byKey.values()], turns, skipped: null};

@@ -180,7 +180,7 @@ export async function makeOpencodeDbFile(path: string, rows: OcSessionRow[]): Pr
   const db = new Database(path);
   fillSessionTable(db, rows);
   db.close();
-  return Promise.resolve(path);
+  return path;
 }
 
 export interface OcMsgOpts {
@@ -254,5 +254,5 @@ export async function makeOpencodeMessageDb(path: string, rows: OcMsgRow[], sess
   }
   if (parts.length > 0) fillPartTable(db, parts);
   db.close();
-  return Promise.resolve(path);
+  return path;
 }

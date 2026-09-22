@@ -1,7 +1,9 @@
-// claude.test.ts — claude-code 请求收集测试 (request 粒度 + 成功过滤)
+// claude.test.ts — claude-code 请求收集测试 (request 粒度 + 成功过滤 + v2 计数)
 // 覆盖: 四分类映射 / messageId 去重末值 (流式 chunk) / isApiErrorMessage 剔除 /
 // 全零行剔除 / sidechain 计入 / reqKey(sess:msg) 与跨会话同 id 不冲突 /
-// 坏行与缺字段静默跳过 / sessionId 缺省回退文件名。
+// 坏行与缺字段静默跳过 / sessionId 缺省回退文件名 /
+// n_tools (tool_use 块计数, 流式末值行) / 用户轮次 (真用户行计入, tool_result/
+// sidechain/meta 剔除) / turnKey 形状与去重。
 import {describe, expect, it} from "bun:test";
 import {collectClaudeRequests} from "../src/collectors/claude.js";
 import {T0, claudeAssistant, claudeUser, makeHome, writeLines} from "./fixtures.js";
@@ -16,7 +18,7 @@ describe("collectClaudeRequests 解析", () => {
       const {rows, skipped} = await collectClaudeRequests(p);
       expect(skipped).toBeNull();
       expect(rows).toEqual([
-        {harness: "claude-code", reqKey: "sess-1:m1", sessKey: "sess-1", model: "claude-sonnet-5", ts: T0, inT: 100, outT: 10, crT: 5, cwT: 3},
+        {harness: "claude-code", reqKey: "sess-1:m1", sessKey: "sess-1", model: "claude-sonnet-5", ts: T0, inT: 100, outT: 10, crT: 5, cwT: 3, nTools: 0},
       ]);
     } finally {
       await h.cleanup();
@@ -58,7 +60,7 @@ describe("collectClaudeRequests 解析", () => {
     try {
       const p = await writeLines(`${h.home}/s1.jsonl`, [
         claudeAssistant({msgId: "zero", input: 0, output: 0, ts: T0}),
-        claudeUser(T0),
+        claudeUser({ts: T0}),
         {broken: "not json will fail parse" /* 合法 JSON 但非 assistant */},
       ]);
       const {rows} = await collectClaudeRequests(p);
@@ -117,6 +119,85 @@ describe("collectClaudeRequests 解析", () => {
       const p = await writeLines(`${h.home}/s1.jsonl`, [l1, l2]);
       const {rows} = await collectClaudeRequests(p);
       expect(rows.map((r) => r.reqKey).sort()).toEqual(["sess-1:@line:2", "sess-1:explicit"]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("collectClaudeRequests n_tools (tool_use 块计数)", () => {
+  it("content 数组中 tool_use 块计数; 纯文本 content 计 0", async () => {
+    const h = await makeHome();
+    try {
+      const p = await writeLines(`${h.home}/s1.jsonl`, [
+        claudeAssistant({msgId: "two", input: 10, output: 1, ts: T0, toolUses: 2}),
+        claudeAssistant({msgId: "none", input: 10, output: 1, ts: T0}), // content = "ok" 字符串
+      ]);
+      const {rows} = await collectClaudeRequests(p);
+      expect(rows.find((r) => r.reqKey === "sess-1:two")!.nTools).toBe(2);
+      expect(rows.find((r) => r.reqKey === "sess-1:none")!.nTools).toBe(0);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("流式 chunk: tool_use 块随末值行 (首行 0 块 → 末行 2 块, 取末行)", async () => {
+    const h = await makeHome();
+    try {
+      const p = await writeLines(`${h.home}/s1.jsonl`, [
+        claudeAssistant({msgId: "m1", input: 10, output: 1, ts: T0}), // 首 chunk 无 tool_use
+        claudeAssistant({msgId: "m1", input: 100, output: 12, ts: T0 + 5, toolUses: 2}),
+      ]);
+      const {rows} = await collectClaudeRequests(p);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.nTools).toBe(2); // 末值行 content 完整
+      expect(rows[0]!.inT).toBe(100);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("collectClaudeRequests 用户轮次 (真实用户行判定)", () => {
+  it("真用户行计入; tool_result / sidechain / meta 行剔除", async () => {
+    const h = await makeHome();
+    try {
+      const p = await writeLines(`${h.home}/s1.jsonl`, [
+        claudeUser({uuid: "u-real-1"}), // 真用户
+        claudeUser({uuid: "u-tool", toolResult: true}), // 工具结果回传
+        claudeUser({uuid: "u-side", sidechain: true}), // 子代理提示
+        claudeUser({uuid: "u-meta", meta: true}), // 系统注入
+        claudeUser({uuid: "u-real-2"}), // 真用户
+      ]);
+      const {turns} = await collectClaudeRequests(p);
+      expect(turns.map((t) => t.turnKey)).toEqual(["sess-1:u-real-1", "sess-1:u-real-2"]);
+      expect(turns.every((t) => t.harness === "claude-code" && t.sessKey === "sess-1")).toBe(true);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("turnKey: uuid 缺省回退行号; sessionId 缺省回退文件名 (与 reqKey 同风格)", async () => {
+    const h = await makeHome();
+    try {
+      const line = claudeUser({});
+      delete (line as Record<string, unknown>).uuid;
+      delete (line as Record<string, unknown>).sessionId;
+      const p = await writeLines(`${h.home}/conv-9.jsonl`, [line]);
+      const {turns} = await collectClaudeRequests(p);
+      expect(turns).toEqual([{harness: "claude-code", turnKey: "conv-9:@line:1", sessKey: "conv-9"}]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("user 行不计入请求 (即使全文件只有 user 行)", async () => {
+    const h = await makeHome();
+    try {
+      const p = await writeLines(`${h.home}/s1.jsonl`, [claudeUser({uuid: "u1"}), claudeUser({uuid: "u2"})]);
+      const {rows, turns} = await collectClaudeRequests(p);
+      expect(rows).toHaveLength(0);
+      expect(turns).toHaveLength(2);
     } finally {
       await h.cleanup();
     }

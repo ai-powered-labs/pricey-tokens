@@ -1,10 +1,12 @@
 // codex.test.ts — codex 请求收集测试 (per-token_count 事件 request 粒度)
 // 覆盖: last_token_usage 直给增量 / total 差分回退 / 负差分跳过且基线重同步 /
 // 事件序号 reqKey / turn_context 运行模型 / 无 token 数据文件 skipped /
-// 全零事件剔除 / 增量和 == 末态 total (逐事件求和不重复计数的性质锚)。
+// 全零事件剔除 / 增量和 == 末态 total (逐事件求和不重复计数的性质锚) /
+// n_tools (response_item 工具词表 / 归次请求 / 输出行不计 / 尾部 pending 丢弃) /
+// n_turns (turn_context 计数, 键 文件名#tc序号)。
 import {describe, expect, it} from "bun:test";
 import {collectCodexRequests} from "../src/collectors/codex.js";
-import {T0, DAY, codexOldFirstLine, codexSessionMeta, codexTokenLine, codexTurnContext, makeHome, writeLines} from "./fixtures.js";
+import {T0, DAY, codexMessageItem, codexOldFirstLine, codexSessionMeta, codexTokenLine, codexToolItem, codexToolOutputItem, codexTurnContext, makeHome, writeLines} from "./fixtures.js";
 
 const ROLLOUT = "rollout-2026-05-08T02-30-49-abc.jsonl";
 
@@ -24,8 +26,8 @@ describe("collectCodexRequests 事件增量", () => {
       const {rows, skipped} = await collectCodexRequests(p);
       expect(skipped).toBeNull();
       expect(rows).toEqual([
-        {harness: "codex", reqKey: `${ROLLOUT.replace(".jsonl", "")}#1`, sessKey: ROLLOUT.replace(".jsonl", ""), model: "gpt-5-codex", ts: T0, inT: 100, outT: 30, crT: 20, cwT: 0},
-        {harness: "codex", reqKey: `${ROLLOUT.replace(".jsonl", "")}#2`, sessKey: ROLLOUT.replace(".jsonl", ""), model: "gpt-5-codex", ts: T0 + 1000, inT: 150, outT: 50, crT: 40, cwT: 0},
+        {harness: "codex", reqKey: `${ROLLOUT.replace(".jsonl", "")}#1`, sessKey: ROLLOUT.replace(".jsonl", ""), model: "gpt-5-codex", ts: T0, inT: 100, outT: 30, crT: 20, cwT: 0, nTools: 0},
+        {harness: "codex", reqKey: `${ROLLOUT.replace(".jsonl", "")}#2`, sessKey: ROLLOUT.replace(".jsonl", ""), model: "gpt-5-codex", ts: T0 + 1000, inT: 150, outT: 50, crT: 40, cwT: 0, nTools: 0},
       ]);
     } finally {
       await h.cleanup();
@@ -149,6 +151,86 @@ describe("collectCodexRequests 事件增量", () => {
       const {rows} = await collectCodexRequests(p);
       expect(rows[0]!.ts).toBe(T0);
       expect(rows[1]!.ts).toBe(T0 + DAY);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("collectCodexRequests n_tools (response_item 工具调用)", () => {
+  it("工具词表全计入 (function/custom_tool/local_shell/web_search); 归属下一个 token_count 请求", async () => {
+    const h = await makeHome();
+    try {
+      const p = await writeRollout(h.home, [
+        codexToolItem("function_call"),
+        codexToolItem("local_shell_call"),
+        codexTokenLine({ts: T0, last: [10, 0, 0]}), // 归前面 2 个工具
+        codexToolItem("web_search_call"),
+        codexToolItem("custom_tool_call"),
+        codexToolItem("function_call"),
+        codexTokenLine({ts: T0 + 1000, last: [20, 0, 0]}), // 归前面 3 个工具
+      ]);
+      const {rows} = await collectCodexRequests(p);
+      expect(rows.map((r) => [r.inT, r.nTools])).toEqual([[10, 2], [20, 3]]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("输出行 (function_call_output) 与普通消息行不计; 尾部未跟请求的 pending 丢弃", async () => {
+    const h = await makeHome();
+    try {
+      const p = await writeRollout(h.home, [
+        codexToolItem(),
+        codexToolOutputItem(), // 结果行不计
+        codexMessageItem("assistant"), // 消息行不计
+        codexTokenLine({ts: T0, last: [10, 0, 0]}), // nTools = 1
+        codexToolItem(), // 之后再无请求 → 丢弃
+      ]);
+      const {rows} = await collectCodexRequests(p);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.nTools).toBe(1);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("无增量信息的 token_count 事件: pending 留待下一请求 (不丢)", async () => {
+    const h = await makeHome();
+    try {
+      // 事件 1 无 total 无 last → 不构成请求行, pending 保留到事件 2
+      const noInfo = {type: "event_msg", payload: {type: "token_count", info: {}}};
+      const p = await writeRollout(h.home, [
+        codexToolItem(),
+        noInfo,
+        codexTokenLine({ts: T0, last: [10, 0, 0]}),
+      ]);
+      const {rows} = await collectCodexRequests(p);
+      expect(rows[0]!.nTools).toBe(1);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("collectCodexRequests n_turns (turn_context 计数)", () => {
+  it("每 turn_context 事件一轮, 键 文件名#tc序号 (与 reqKey 序号空间隔离)", async () => {
+    const h = await makeHome();
+    try {
+      const p = await writeRollout(h.home, [
+        codexTurnContext("gpt-5"),
+        codexTokenLine({ts: T0, last: [10, 0, 0]}),
+        codexTurnContext("gpt-5"),
+        codexTokenLine({ts: T0 + 1000, last: [20, 0, 0]}),
+        codexTurnContext("gpt-5"), // 末轮无请求 (进行中) 也计
+      ]);
+      const {turns} = await collectCodexRequests(p);
+      const base = ROLLOUT.replace(".jsonl", "");
+      expect(turns).toEqual([
+        {harness: "codex", turnKey: `${base}#tc1`, sessKey: base},
+        {harness: "codex", turnKey: `${base}#tc2`, sessKey: base},
+        {harness: "codex", turnKey: `${base}#tc3`, sessKey: base},
+      ]);
     } finally {
       await h.cleanup();
     }

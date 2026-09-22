@@ -45,14 +45,20 @@ export interface ClaudeOpts {
   sidechain?: boolean;
   sessionId?: string;
   isApiError?: boolean; // isApiErrorMessage 行 (成功过滤的剔除面)
+  toolUses?: number; // message.content 中 tool_use 块数 (n_tools 提取面)
 }
 
-// assistant 记录; cache 字段缺省时不写键 (模拟第三方端点只回 input/output 的实测形态)
+// assistant 记录; cache 字段缺省时不写键 (模拟第三方端点只回 input/output 的实测形态);
+// toolUses > 0 时 content 为 [text 块, N × tool_use 块] 数组 (流式末值行的实测形态)
 export function claudeAssistant(o: ClaudeOpts = {}): Record<string, unknown> {
   claudeSeq++;
   const usage: Record<string, number> = {input_tokens: o.input ?? 0, output_tokens: o.output ?? 0};
   if (o.cacheWrite !== undefined) usage.cache_creation_input_tokens = o.cacheWrite;
   if (o.cacheRead !== undefined) usage.cache_read_input_tokens = o.cacheRead;
+  const n = o.toolUses ?? 0;
+  const content = n > 0
+    ? [{type: "text", text: "thinking..."}, ...Array.from({length: n}, (_, i) => ({type: "tool_use", id: `tu-${claudeSeq}-${i}`, name: "Bash", input: {cmd: "ls"}}))]
+    : "ok";
   return {
     type: "assistant",
     isApiErrorMessage: o.isApiError ?? false ? true : undefined,
@@ -60,12 +66,34 @@ export function claudeAssistant(o: ClaudeOpts = {}): Record<string, unknown> {
     uuid: `u-${claudeSeq}`,
     sessionId: o.sessionId ?? "sess-1",
     timestamp: iso(o.ts ?? T0),
-    message: {id: o.msgId ?? `msg-${claudeSeq}`, type: "message", role: "assistant", model: o.model ?? "claude-sonnet-5", usage},
+    message: {id: o.msgId ?? `msg-${claudeSeq}`, type: "message", role: "assistant", model: o.model ?? "claude-sonnet-5", usage, content},
   };
 }
 
-export function claudeUser(ts = T0): Record<string, unknown> {
-  return {type: "user", uuid: `u-${++claudeSeq}`, timestamp: iso(ts), message: {role: "user", content: "hi"}};
+export interface ClaudeUserOpts {
+  ts?: number;
+  sessionId?: string;
+  uuid?: string;
+  sidechain?: boolean; // 子代理提示 (真实轮次剔除面)
+  toolResult?: boolean; // content 为纯 tool_result 数组 (真实轮次剔除面)
+  meta?: boolean; // isMeta 系统注入行 (真实轮次剔除面)
+}
+
+// user 记录 (轮次计数的判定面)
+export function claudeUser(o: ClaudeUserOpts = {}): Record<string, unknown> {
+  claudeSeq++;
+  const content = o.toolResult
+    ? [{type: "tool_result", tool_use_id: `tu-${claudeSeq}`, content: "output"}]
+    : "hi";
+  return {
+    type: "user",
+    isSidechain: o.sidechain ?? false,
+    isMeta: o.meta ?? false ? true : undefined,
+    uuid: o.uuid ?? `u-${claudeSeq}`,
+    sessionId: o.sessionId ?? "sess-1",
+    timestamp: iso(o.ts ?? T0),
+    message: {role: "user", content},
+  };
 }
 
 // --- codex 行构造 ({timestamp, type, payload} 新格式包装) ---
@@ -85,6 +113,21 @@ export function codexTokenLine(o: CodexTokenOpts): Record<string, unknown> {
 
 export function codexTurnContext(model: string, ts = T0): Record<string, unknown> {
   return {timestamp: iso(ts), type: "turn_context", payload: {model, effort: "medium", approval_policy: "never"}};
+}
+
+// response_item 行 (工具调用记录, n_tools 提取面; type 词表经 codex-rs v0.94 验证)
+export function codexToolItem(kind: "function_call" | "custom_tool_call" | "local_shell_call" | "web_search_call" = "function_call", ts = T0): Record<string, unknown> {
+  return {timestamp: iso(ts), type: "response_item", payload: {type: kind, call_id: "c1", name: "shell"}};
+}
+
+// response_item 输出行 (工具结果 — 不计入 n_tools)
+export function codexToolOutputItem(ts = T0): Record<string, unknown> {
+  return {timestamp: iso(ts), type: "response_item", payload: {type: "function_call_output", call_id: "c1", output: {success: true}}};
+}
+
+// response_item 普通消息行 (非工具)
+export function codexMessageItem(role: string, ts = T0): Record<string, unknown> {
+  return {timestamp: iso(ts), type: "response_item", payload: {type: "message", role, content: [{type: "output_text", text: "hi"}]}};
 }
 
 export function codexSessionMeta(ts = T0): Record<string, unknown> {
@@ -177,10 +220,20 @@ export function ocMsg(o: OcMsgOpts = {}): string {
 }
 
 // message 表库 (账本摄取主形态): 行级 session 归属 + 可选新 schema session 汇总表
-// (对账权威源)。rowid 按插入序 1..N (水位线测试的可预测基准)。
+// (对账权威源) + 可选 part 表 (工具调用, n_tools 提取面 — 2026-09 实测 parts 在
+// 独立 part 表而非 message.data 内嵌)。rowid 按插入序 1..N (水位线测试的可预测基准)。
 export interface OcMsgRow {
   sess?: string; // 缺省 's0'
   data?: string | null; // 缺省 ocMsg() 默认行; null = NULL data 列
+  tools?: number; // 为该 message 行生成的 tool part 数 (0 = 不生成)
+}
+
+// part 表 (id, message_id, session_id, data) — 真实 schema 同名列子集
+function fillPartTable(db: FillCtx, parts: Array<{id: string; messageId: string; sessionId: string; type: string}>): void {
+  db.exec(`CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL, time_created integer NOT NULL DEFAULT 0, time_updated integer NOT NULL DEFAULT 0, data text)`);
+  for (const p of parts) {
+    db.exec(`INSERT INTO part (id, message_id, session_id, data) VALUES ('${p.id}', '${p.messageId}', '${p.sessionId}', ${sqlStr(JSON.stringify({type: p.type}))})`);
+  }
 }
 
 export async function makeOpencodeMessageDb(path: string, rows: OcMsgRow[], sessionRows: OcSessionRow[] = []): Promise<string> {
@@ -189,11 +242,17 @@ export async function makeOpencodeMessageDb(path: string, rows: OcMsgRow[], sess
   if (sessionRows.length > 0) {
     fillSessionTable(db, sessionRows);
   }
+  const parts: Array<{id: string; messageId: string; sessionId: string; type: string}> = [];
   db.exec("CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text)");
   for (const [i, r] of rows.entries()) {
     const data = r.data === undefined ? ocMsg() : r.data;
-    db.exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('m${i}', '${r.sess ?? "s0"}', 0, 0, ${data === null ? "NULL" : sqlStr(data)})`);
+    const sess = r.sess ?? "s0";
+    db.exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('m${i}', '${sess}', 0, 0, ${data === null ? "NULL" : sqlStr(data)})`);
+    for (let t = 0; t < (r.tools ?? 0); t++) {
+      parts.push({id: `p${i}-${t}`, messageId: `m${i}`, sessionId: sess, type: "tool"});
+    }
   }
+  if (parts.length > 0) fillPartTable(db, parts);
   db.close();
   return Promise.resolve(path);
 }

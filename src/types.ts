@@ -18,6 +18,16 @@ export interface RequestRow {
   outT: number;
   crT: number;
   cwT: number;
+  nTools: number; // 该请求 assistant 消息中的工具调用数 (源格式不可得时恒 0, 见各收集器头注)
+}
+
+// 用户轮次原子 (账本 turn_events 表的行形态; 用户行不入 requests, 摄取时顺路计数)。
+// 键契约 (与 reqKey 同风格): claude="<sessKey>:<uuid|@line:N>" / opencode="<库名>:<rowid>"
+// / codex="<rollout 文件名>#tc<文件内 turn_context 序号>"; INSERT OR IGNORE 归并幂等。
+export interface TurnRow {
+  harness: HarnessId;
+  turnKey: string;
+  sessKey: string;
 }
 
 export type HarnessId = "opencode" | "claude-code" | "codex";

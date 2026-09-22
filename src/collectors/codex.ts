@@ -1,6 +1,7 @@
 // collectors/codex.ts — codex 请求收集 (~/.codex/sessions/**/rollout-*.jsonl)
-// 职责边界: rollout jsonl → RequestRow[] (request 粒度)。事件语义移植自站点侧解析器
-// (口径 SSOT 在站点侧), 账本口径下从"会话累计末值"改为逐事件 request 粒度:
+// 职责边界: rollout jsonl → RequestRow[] (request 粒度) + TurnRow[] (用户轮次)。
+// 事件语义移植自站点侧解析器 (口径 SSOT 在站点侧), 账本口径下从"会话累计末值"改为
+// 逐事件 request 粒度:
 //   - 每 token_count 事件 = 一次 API 请求: tokens 取 info.last_token_usage (该次
 //     请求的增量); last 缺失时回退相邻 total_token_usage 差分 (total 是会话累计
 //     计数器, 差分即该次增量; 首事件差分基线为 0);
@@ -12,12 +13,20 @@
 //   - ts 取事件包装行的 timestamp; 无 timestamp 的事件沿用文件内最近可解析时刻
 //     (事件流单调), 全程无可解析时刻的事件才跳过;
 //   - 无 token_count 的文件 (旧格式 / 过短会话) 整文件进 skipped 附原因 (编排层)。
+// n_tools (v2, 源格式 2026-09 经 codex-rs v0.94 源码验证): rollout 持久化策略不落
+//   执行类 event_msg (exec_command_begin 等), 权威工具调用记录是 response_item 行
+//   payload.type ∈ {function_call, custom_tool_call, local_shell_call,
+//   web_search_call} (输出型 *_output 是结果不计)。归属: response 的 function_call
+//   落盘先于其 token_count 事件 (流内 item 先到, 完成时才发 token_count), 故 pending
+//   工具计数记到**下一个** token_count 请求行; 末尾未跟请求的 pending 丢弃。
+// n_turns (v2): turn_context 事件计数 (每用户轮恰好一个, 持久化策略恒落盘)。
 // 归并键: reqKey = "<rollout 文件名>#<文件内 token_count 事件序号 (1 起)>";
+// turnKey = "<rollout 文件名>#tc<turn_context 序号 (1 起)>";
 // sessKey = rollout 文件名 (文件即会话)。cached_input_tokens → cacheRead
 // (codex 无 cache 写入概念, cacheWrite 恒 0)。
 import {basename} from "node:path";
 import {readFile} from "node:fs/promises";
-import type {RequestRow} from "../types.js";
+import type {RequestRow, TurnRow} from "../types.js";
 import {isObj, posNum} from "../guards.js";
 
 interface TokenUsage {
@@ -42,12 +51,17 @@ function eventDelta(last: TokenUsage | null, total: TokenUsage | null, prevTotal
   return d.input < 0 || d.cached < 0 || d.output < 0 ? null : d; // 负差分 = 计数器异常
 }
 
+// response_item 的工具调用 payload.type 词表 (codex-rs ResponseItem serde snake_case,
+// 2026-09 v0.94 验证; 执行类 event_msg 不持久化, 见头注)
+const TOOL_CALL_ITEM_TYPES: ReadonlySet<string> = new Set(["function_call", "custom_tool_call", "local_shell_call", "web_search_call"]);
+
 export interface CodexFileResult {
   rows: RequestRow[];
+  turns: TurnRow[];
   skipped: string | null; // 无 token 数据的文件附原因 (含文件短名前缀)
 }
 
-// 单文件收集: 读文件 → 该会话全部请求行, 或跳过原因 (读取失败由编排层兜为 skipped)
+// 单文件收集: 读文件 → 该会话全部请求行 + 轮次行, 或跳过原因 (读取失败由编排层兜为 skipped)
 export async function collectCodexRequests(path: string): Promise<CodexFileResult> {
   const displayName = path.replace(/^.*\.codex\/sessions\//, ""); // 相对 sessions 的短名
   const text = await readFile(path, "utf8");
@@ -56,8 +70,11 @@ export async function collectCodexRequests(path: string): Promise<CodexFileResul
   let model = ""; // turn_context 最后出现的模型 (运行值)
   let ts = 0; // 最近可解析的事件时刻 (运行值)
   let eventSeq = 0; // token_count 事件序号 (reqKey 组成)
+  let turnSeq = 0; // turn_context 事件序号 (turnKey 组成)
+  let pendingTools = 0; // 已见未归属的工具调用 (归下一个 token_count 请求)
   let sawAnyTokenEvent = false;
   const rows: RequestRow[] = [];
+  const turns: TurnRow[] = [];
   for (const rawLine of text.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -71,6 +88,11 @@ export async function collectCodexRequests(path: string): Promise<CodexFileResul
     if (o.type === "turn_context") {
       const p = o.payload;
       if (isObj(p) && typeof p.model === "string" && p.model !== "") model = p.model;
+      turnSeq += 1;
+      turns.push({harness: "codex", turnKey: `${fileBase}#tc${turnSeq}`, sessKey: fileBase});
+    } else if (o.type === "response_item") {
+      const p = o.payload;
+      if (isObj(p) && typeof p.type === "string" && TOOL_CALL_ITEM_TYPES.has(p.type)) pendingTools += 1;
     } else if (o.type === "event_msg") {
       const p = o.payload;
       if (!isObj(p) || p.type !== "token_count") continue;
@@ -84,7 +106,9 @@ export async function collectCodexRequests(path: string): Promise<CodexFileResul
       const delta = eventDelta(normUsage(info.last_token_usage), total, lastTotal);
       if (total) lastTotal = total; // 差分基线前进 (无论本事件是否可计)
       eventSeq += 1;
-      if (delta === null) continue; // 无增量信息 (非错误, 该事件不构成请求行)
+      if (delta === null) continue; // 无增量信息 (非错误, 该事件不构成请求行; pending 留待下一事件)
+      const nTools = pendingTools;
+      pendingTools = 0;
       sawAnyTokenEvent = true;
       if (delta.input === 0 && delta.cached === 0 && delta.output === 0) continue; // 全零非用量
       if (ts <= 0) continue; // 无法归属时刻的请求无法归属日, 跳过
@@ -98,11 +122,12 @@ export async function collectCodexRequests(path: string): Promise<CodexFileResul
         outT: delta.output,
         crT: delta.cached,
         cwT: 0,
+        nTools,
       });
     }
   }
   if (!sawAnyTokenEvent) {
-    return {rows, skipped: `${displayName} (会话无可用 token_count 事件)`};
+    return {rows, turns, skipped: `${displayName} (会话无可用 token_count 事件)`};
   }
-  return {rows, skipped: null};
+  return {rows, turns, skipped: null};
 }

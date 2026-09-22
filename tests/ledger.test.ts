@@ -26,6 +26,7 @@ const row = (o: Partial<RequestRow> & {reqKey: string; ts: number}): RequestRow 
   outT: 50,
   crT: 10,
   cwT: 5,
+  nTools: 0,
   ...o,
 });
 

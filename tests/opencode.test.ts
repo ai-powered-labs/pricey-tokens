@@ -1,7 +1,8 @@
 // opencode.test.ts — opencode 请求收集 (message 表 SQL 抽取) + 对账源读取测试
 // 覆盖: SQL 抽取口径 (model 拼接 / 秒毫秒折算 / reasoning 并入 / cell 守卫 /
 // 全零与无模型与坏行排除)、成功过滤 (error 键 / tokens 键缺失)、rowid 水位线
-// (增量与库重建重置)、reqKey 库名隔离、对账源 (session 汇总 / 旧 schema null)。
+// (增量与库重建重置)、reqKey 库名隔离、n_tools (part 表工具计数 / 无 part 表计 0)、
+// 用户轮次 (user 行顺路计数 / 键与幂等)、对账源 (session 汇总 / 旧 schema null)。
 import {describe, expect, it} from "bun:test";
 import {collectOpencodeRequests, epochMs, opencodeSessionSummaries} from "../src/collectors/opencode.js";
 import {DAY, T0, makeHome, makeOpencodeDbFile, makeOpencodeMessageDb, ocMsg} from "./fixtures.js";
@@ -23,13 +24,13 @@ describe("collectOpencodeRequests (message 表抽取)", () => {
     try {
       const db = await makeOpencodeMessageDb(`${h.home}/opencode-stable.db`, [
         {sess: "s1", data: ocMsg({input: 100, output: 50, reasoning: 7, cacheRead: 5000, cacheWrite: 300, created: T0})},
-        {sess: "s1", data: ocMsg({role: "user", created: T0})}, // 非 assistant → SQL 侧排除
+        {sess: "s1", data: ocMsg({role: "user", created: T0})}, // 非 assistant → 不构成用量行 (轮次行)
       ]);
       const {rows, maxRowid, reset} = await collectOpencodeRequests(db, 0);
       expect(reset).toBe(false);
       expect(maxRowid).toBe(2);
       expect(rows).toEqual([
-        {harness: "opencode", reqKey: "opencode-stable.db:1", sessKey: "s1", model: "zai-coding-plan/glm-5.3", ts: T0, inT: 100, outT: 57, crT: 5000, cwT: 300},
+        {harness: "opencode", reqKey: "opencode-stable.db:1", sessKey: "s1", model: "zai-coding-plan/glm-5.3", ts: T0, inT: 100, outT: 57, crT: 5000, cwT: 300, nTools: 0},
       ]);
     } finally {
       await h.cleanup();
@@ -135,6 +136,70 @@ describe("collectOpencodeRequests (message 表抽取)", () => {
       const db = await makeOpencodeMessageDb(`${h.home}/opencode.db`, [{sess: "", data: ocMsg({input: 1})}]);
       const {rows} = await collectOpencodeRequests(db, 0);
       expect(rows[0]!.sessKey).toBe("~self:opencode.db:1");
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("collectOpencodeRequests n_tools (part 表工具计数)", () => {
+  it("part 表 type=tool 行按 message_id 归属计数; 非 tool part 不计", async () => {
+    const h = await makeHome();
+    try {
+      const db = await makeOpencodeMessageDb(`${h.home}/opencode-stable.db`, [
+        {sess: "s1", data: ocMsg({input: 10, created: T0}), tools: 3},
+        {sess: "s1", data: ocMsg({input: 20, created: T0})}, // 无 tool part → 0
+      ]);
+      const {rows} = await collectOpencodeRequests(db, 0);
+      expect(rows.find((r) => r.inT === 10)!.nTools).toBe(3);
+      expect(rows.find((r) => r.inT === 20)!.nTools).toBe(0);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("无 part 表 (远古 schema) → nTools 恒 0, 扫描不失败", async () => {
+    const h = await makeHome();
+    try {
+      const db = await makeOpencodeMessageDb(`${h.home}/opencode.db`, [{data: ocMsg({input: 1, created: T0})}]);
+      const {rows} = await collectOpencodeRequests(db, 0);
+      expect(rows[0]!.nTools).toBe(0);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("collectOpencodeRequests 用户轮次 (user 行顺路计数)", () => {
+  it("user 行 → TurnRow (键 库名:rowid); assistant 行不产轮次", async () => {
+    const h = await makeHome();
+    try {
+      const db = await makeOpencodeMessageDb(`${h.home}/opencode-stable.db`, [
+        {sess: "s0", data: ocMsg({role: "user", created: T0})}, // rowid 1
+        {sess: "s0", data: ocMsg({input: 10, created: T0})}, // rowid 2 (assistant)
+        {sess: "s1", data: ocMsg({role: "user", created: T0})}, // rowid 3
+      ]);
+      const {turns} = await collectOpencodeRequests(db, 0);
+      expect(turns).toEqual([
+        {harness: "opencode", turnKey: "opencode-stable.db:1", sessKey: "s0"},
+        {harness: "opencode", turnKey: "opencode-stable.db:3", sessKey: "s1"},
+      ]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("水位线增量: 窗口内 user 行才产轮次 (与请求行同窗口)", async () => {
+    const h = await makeHome();
+    try {
+      const db = await makeOpencodeMessageDb(`${h.home}/opencode.db`, [
+        {sess: "s0", data: ocMsg({role: "user", created: T0})},
+        {sess: "s0", data: ocMsg({input: 1, created: T0})},
+        {sess: "s0", data: ocMsg({role: "user", created: T0})},
+      ]);
+      const inc = await collectOpencodeRequests(db, 1); // 只扫 rowid 2..3
+      expect(inc.rows).toHaveLength(1);
+      expect(inc.turns).toEqual([{harness: "opencode", turnKey: "opencode.db:3", sessKey: "s0"}]);
     } finally {
       await h.cleanup();
     }

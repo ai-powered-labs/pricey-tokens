@@ -270,9 +270,9 @@ describe("ProfileV2 发射 (形状 + 不变量 + 双路径同构)", () => {
     expect(m.nTurns).toBe(3); // 两会话轮次和 (1+2)
     expect(m.outHist).toEqual([1, 1, 0, 0, 0, 0, 0, 0, 1]); // 50→桶0, 1500→桶1, 200000→桶8; Σ==nReq
     expect(m.ctxHist.reduce((a, b) => a + b, 0)).toBe(3);
-    // 会话原子: sA max_ctx 100000 (桶5) + sB max_ctx 300000 (桶7), Σ=2 ≤ nSess=2
+    // 会话原子: sA max_ctx 100000 (桶5) + sB max_ctx 300000 (桶8: 256k~512k), Σ=2 ≤ nSess=2
     expect(m.maxCtxHist[5]).toBe(1);
-    expect(m.maxCtxHist[7]).toBe(1);
+    expect(m.maxCtxHist[8]).toBe(1);
     expect(m.maxCtxHist.reduce((a, b) => a + b, 0)).toBe(2);
     expect(m.nSess).toBe(2);
     l.close();

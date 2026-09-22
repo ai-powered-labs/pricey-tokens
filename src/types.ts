@@ -101,6 +101,7 @@ export interface Options {
   share: boolean;
   yes: boolean;
   verbose: boolean; // 过程详情 (探测/跳过/对账/账本增量) — 默认压缩隐藏
+  web: boolean; // 在系统浏览器打开分享链接 (--web) — 默认只打印 URL, 不动用户桌面
   days: number | "all"; // all = 全量; 数字 ≥ 1
   harnesses: HarnessId[]; // 空数组 = 全部源
   api: string; // 上传 API base (无尾斜杠)

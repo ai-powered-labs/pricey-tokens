@@ -9,15 +9,16 @@ $ npx pricey-tokens
 
 探测本机 **opencode / claude-code / codex** 的用量数据, 把每次 API 请求的 token
 四分类 (输入 / 输出 / 缓存读 / 缓存写) 归并进**本机用量账本**, 聚合出日粒度画像,
-生成站点分享链接并在浏览器打开 — 直接看到"你的用量按 API 计价值多少钱、哪个
-订阅套餐更划算"。
+生成站点分享链接打印到终端 (默认不动浏览器, `--web` 才调起) — 直接看到"你的
+用量按 API 计价值多少钱、哪个订阅套餐更划算"。
 
 ## 安装与使用
 
 零全局安装, 直接跑:
 
 ```console
-$ npx pricey-tokens                 # 默认: 收集近 30 天 → stderr 用量摘要 → 打开浏览器换算
+$ npx pricey-tokens                 # 默认: 收集近 30 天 → stderr 用量摘要 + stdout 分享链接
+$ npx pricey-tokens --web           # 同默认, 并在系统浏览器打开分享链接
 $ npx pricey-tokens --days 7        # 小窗口 (分享链接更短)
 $ npx pricey-tokens --days all      # 全量历史
 $ npx pricey-tokens --json          # ProfileV2 JSON 到 stdout (日粒度 + ctx 直方图)
@@ -39,6 +40,7 @@ node 内置 `node:sqlite` — 更老的 node 无法运行本 CLI)。
 | `--share` | 上传后打印分享 URL (须与 `--upload` 同用) | 关 |
 | `--yes` | 跳过上传交互确认 (非交互环境的显式授权) | 关 |
 | `--verbose` | 打印过程详情 (探测/跳过/对账/账本增量 — 排查问题时用) | 关 |
+| `--web` | 在系统浏览器打开分享链接 (默认只打印 URL; 与 `--json`/`--upload` 互斥) | 关 |
 | `--days N\|all` | 出口窗口 (天); `all` = 全量历史; 摄取恒为全历史增量 | 30 |
 | `--harness LIST` | 只收集指定源: `opencode,claude-code,codex` 逗号分隔 | 全部 |
 | `--api URL` | 上传 API base | `https://pricey-tokens.lambda.lc` |

@@ -37,6 +37,7 @@ export function parseArgs(rawArgv: string[]): Options {
     share: false,
     yes: false,
     verbose: false,
+    web: false,
     days: 30,
     harnesses: [],
     api: DEFAULT_API,
@@ -53,6 +54,7 @@ export function parseArgs(rawArgv: string[]): Options {
     else if (arg === "--share") opts.share = true;
     else if (arg === "--yes" || arg === "-y") opts.yes = true;
     else if (arg === "--verbose") opts.verbose = true;
+    else if (arg === "--web") opts.web = true;
     else if (arg === "--days") parseDays(value());
     else if (arg === "--harness") parseHarnesses(value());
     else if (arg === "--api") opts.api = normalizeBase(value());
@@ -60,6 +62,7 @@ export function parseArgs(rawArgv: string[]): Options {
     else throw new ArgsError(`未知参数: ${arg} (用 --help 查看用法)`);
   }
   if (opts.share && !opts.upload) throw new ArgsError("--share 需与 --upload 同用 (分享 URL 由上传响应派生)");
+  if (opts.web && (opts.json || opts.upload)) throw new ArgsError("--web 仅用于默认分享链接模式 (与 --json / --upload 互斥)");
   return opts;
 
   function parseDays(v: string): void {
@@ -91,7 +94,7 @@ export const HELP_TEXT = `pricey-tokens — 本机 AI coding agent 用量收集�
 用法: pricey-tokens [选项]
 
 探测本机 opencode / claude-code / codex 数据源, 聚合为日粒度用量,
-生成站点分享链接在浏览器打开 (换算你的用量值多少钱)。
+生成站点分享链接打印到终端 (换算你的用量值多少钱; 加 --web 才在浏览器打开)。
 
 选项:
   --json             输出 ProfileV2 JSON (日粒度 + ctx 直方图) 到 stdout
@@ -99,6 +102,7 @@ export const HELP_TEXT = `pricey-tokens — 本机 AI coding agent 用量收集�
   --share            上传后打印分享 URL (须与 --upload 同用)
   --yes              跳过上传交互确认 (非交互环境的显式授权)
   --verbose          打印过程详情 (探测/跳过/对账/账本增量 — 排查问题时用)
+  --web              在系统浏览器打开分享链接 (默认只打印 URL; 与 --json / --upload 互斥)
   --days N|all       出口窗口天数 (默认 30; all = 全量; 摄取恒为全历史增量)
   --harness LIST       只收集指定源, 逗号分隔: opencode,claude-code,codex
   --api URL          上传 API base (默认 https://pricey-tokens.lambda.lc)

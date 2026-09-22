@@ -3,8 +3,8 @@
 // 职责边界: 参数解析 (args) → 增量摄取 (ingest → ledger, 全历史水位线增量, 与窗口
 // 无关) → 账本窗口查询 → 按模式出口:
 //   - 默认: stderr 用量摘要 (report.renderSummary, 总览/模型分布/每日趋势) →
-//     日粒度记录 → 站点分享 hash → 打开浏览器 (CLI 的核心体验: 一条命令看到用量
-//     与换算结果; #u= 比特兼容契约不变)
+//     日粒度记录 → 站点分享 hash → stdout URL (浏览器仅 --web 时调起 — CLI
+//     默认不动用户桌面; #u= 比特兼容契约不变)
 //   - --json: ProfileV2 JSON 到 stdout (day 粒度 + ctx 直方图)
 //   - --upload: 完整预览 payload (ProfileV2) → 确认 → POST → (--share 打印分享 URL)
 // 过程详情 (探测/跳过/对账/账本增量) 默认隐藏 — 压缩为单行计数提示 (异常可见不
@@ -110,8 +110,8 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  // 默认出口模式 (无 --json 无 --upload): stderr 用量摘要 → 分享 hash → 打开浏览器;
-  // 摘要与浏览器两处共用此谓词, 新增出口模式时只改这一处
+  // 默认出口模式 (无 --json 无 --upload): stderr 用量摘要 → 分享 hash → stdout URL
+  // (--web 时才调起浏览器); 摘要与出口两处共用此谓词, 新增出口模式时只改这一处
   const defaultMode = !opts.json && !opts.upload;
   if (defaultMode) {
     err("\n" + renderSummary({
@@ -159,7 +159,8 @@ async function main(): Promise<number> {
     }
   }
 
-  // 默认出口收尾: 分享 hash + 打开浏览器 (--json/--upload 模式下不重复打开 —
+  // 默认出口收尾: 分享 hash → stdout URL。浏览器仅 --web 时调起 (CLI 不自动动
+  // 用户桌面 — 终端点击/管道复制已是完整直达路径; --json/--upload 模式无 URL,
   // 详见 README 各模式说明)
   if (defaultMode) {
     if (daily.length === 0) {
@@ -172,8 +173,12 @@ async function main(): Promise<number> {
       err("建议用 --days 7 缩小窗口后再生成分享链接。");
     }
     out(url);
-    err("\n正在浏览器打开换算结果… (未自动打开时手动访问上方 URL)");
-    openUrl(url);
+    if (opts.web) {
+      err("\n正在浏览器打开换算结果… (未自动打开时手动访问上方 URL)");
+      openUrl(url);
+    } else {
+      err("\n分享链接已在上方输出 (终端通常可点击打开; 加 --web 可让 CLI 调起浏览器)");
+    }
   }
   return exit;
 }

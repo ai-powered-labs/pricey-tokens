@@ -1,8 +1,9 @@
 // cli.test.ts — CLI 编排出口测试 (子进程跑 src/cli.ts, 断言退出码与 stdout/stderr 纪律)
 // 覆盖: --help/--version 前置短路 (exit 0, 不落参数错误)、未知参数 exit 1、空数据
-// home exit 1、--json stdout 纯净可 parse、默认模式 stdout 是 URL、HOME/XDG 注入。
+// home exit 1、--json stdout 纯净可 parse、默认模式 stdout 是 URL 且零副作用
+// (不调系统浏览器)、--web 显式调起、--web 互斥校验、HOME/XDG 注入。
 import {describe, expect, it} from "bun:test";
-import {mkdtemp, mkdir, rm} from "node:fs/promises";
+import {mkdtemp, mkdir, rm, writeFile, readFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {T0, claudeAssistant, writeLines} from "./fixtures.js";
@@ -35,6 +36,47 @@ async function emptyHome(): Promise<{home: string; env: Record<string, string>; 
   };
 }
 
+// xdg-open PATH 替身: 只把收到的参数记进日志文件, 不真开浏览器 — 默认模式的
+// "零副作用" 与 --web 的 "确实调起" 都以它断言 (测试密封, 与宿主桌面环境无关)
+async function openShim(): Promise<{env: Record<string, string>; logPath: string; cleanup: () => Promise<void>}> {
+  const dir = await mkdtemp(join(tmpdir(), "pt-shim-"));
+  const logPath = join(dir, "log");
+  await writeFile(join(dir, "xdg-open"), `#!/bin/sh\necho "$1" >> "${logPath}"\n`, {mode: 0o755});
+  return {
+    env: {PATH: `${dir}:${process.env.PATH ?? ""}`},
+    logPath,
+    cleanup: () => rm(dir, {recursive: true, force: true}),
+  };
+}
+
+// 等 shim 日志出现指定内容 (opener 是 detached 即发即弃, CLI 退出不保证孙进程已落盘)
+async function logContains(path: string, needle: string, timeoutMs = 5000): Promise<boolean> {
+  for (let i = 0; i < timeoutMs / 50; i++) {
+    try {
+      if ((await readFile(path, "utf8")).includes(needle)) return true;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+// 有 claude 数据的 home + xdg-open 替身 (浏览器行为两条断言的公共脚手架)
+async function homeWithShim(): Promise<{env: Record<string, string>; logPath: string; cleanup: () => Promise<void>}> {
+  const h = await emptyHome();
+  const shim = await openShim();
+  await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
+    claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
+  ]);
+  return {
+    env: {...h.env, ...shim.env},
+    logPath: shim.logPath,
+    cleanup: async () => {
+      await h.cleanup();
+      await shim.cleanup();
+    },
+  };
+}
+
 describe("cli 参数出口", () => {
   it("--help: exit 0, stdout 含用法 (任何组合下都不落参数错误)", async () => {
     for (const args of [["--help"], ["-h"], ["--json", "--help"]]) {
@@ -43,6 +85,7 @@ describe("cli 参数出口", () => {
         const r = await runCli(args, h.env);
         expect(r.code).toBe(0);
         expect(r.stdout).toContain("用法: pricey-tokens");
+        expect(r.stdout).toContain("--web"); // 显式开关须在帮助中可发现
         expect(r.stderr).not.toContain("参数错误");
       } finally {
         await h.cleanup();
@@ -69,6 +112,20 @@ describe("cli 参数出口", () => {
       expect(r.stderr).toContain("参数错误");
     } finally {
       await h.cleanup();
+    }
+  });
+
+  it("--web 与 --json/--upload 互斥: exit 1 参数错误", async () => {
+    for (const other of ["--json", "--upload"]) {
+      const h = await emptyHome();
+      try {
+        const r = await runCli(["--web", other], h.env);
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain("参数错误");
+        expect(r.stderr).toContain("互斥"); // 区别于 "未知参数" 的定向拒绝
+      } finally {
+        await h.cleanup();
+      }
     }
   });
 });
@@ -130,15 +187,30 @@ describe("cli 数据出口", () => {
     }
   });
 
-  it("有数据: 默认模式 stdout 是 #u= URL, 不打开浏览器路径也可复现", async () => {
-    const h = await emptyHome();
+  // shim 只替身 xdg-open — 平台假设显式化: 非 linux 下这两条进程级断言跳过
+  it.skipIf(process.platform !== "linux")("有数据: 默认模式 stdout 是 #u= URL, 且不调系统浏览器 (零副作用契约)", async () => {
+    const h = await homeWithShim();
     try {
-      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
-        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
-      ]);
       const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
       expect(r.code).toBe(0);
       expect(r.stdout.trim()).toMatch(/^http:\/\/localhost:19999\/calc\/#u=/);
+      expect(r.stderr).toContain("--web"); // 引导用户: 想开浏览器有显式开关
+      expect(r.stderr).not.toContain("正在浏览器打开"); // 零竞态次级断言: 回归必经此 stderr 分支
+      // 负向窗口与正向路径的时延预算同量级 (回归的 detached 孙进程落盘可能慢)
+      expect(await logContains(h.logPath, "http://localhost:19999", 1500)).toBe(false);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it.skipIf(process.platform !== "linux")("有数据: --web 显式调起系统浏览器 (opener 收到完整分享 URL)", async () => {
+    const h = await homeWithShim();
+    try {
+      const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/", "--web"], h.env);
+      expect(r.code).toBe(0);
+      const url = r.stdout.trim();
+      expect(url).toMatch(/^http:\/\/localhost:19999\/calc\/#u=/);
+      expect(await logContains(h.logPath, url)).toBe(true); // opener 参数 = stdout 同一 URL
     } finally {
       await h.cleanup();
     }

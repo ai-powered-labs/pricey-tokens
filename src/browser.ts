@@ -1,4 +1,4 @@
-// browser.ts — 跨平台打开浏览器 (分享 URL 的默认出口)
+// browser.ts — 跨平台打开浏览器 (--web 的显式出口; 默认出口只打印 URL, 不动浏览器)
 // 职责边界: spawn 平台 opener 后即脱管 (detached + ignore stdio + unref, CLI 不等
 // 浏览器); opener 不存在时静默降级 — 调用方已把 URL 打印到 stdout, 用户可手动打开。
 import {spawn} from "node:child_process";

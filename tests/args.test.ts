@@ -13,6 +13,7 @@ describe("parseArgs 默认值", () => {
       share: false,
       yes: false,
       verbose: false,
+      web: false,
       days: 30,
       harnesses: [],
       api: DEFAULT_API,

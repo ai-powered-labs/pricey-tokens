@@ -162,8 +162,6 @@ $ pricey-tokens --upload --days 30
 确认上传以上内容? [y/N]
 ```
 
-上传契约见站点仓库 `pricey-tokens-api/CONTRACT.md`。
-
 ## 开发
 
 ```console

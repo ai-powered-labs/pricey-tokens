@@ -1,5 +1,5 @@
 // collectors/claude.ts — claude-code 用量收集 (~/.claude/projects/**/*.jsonl)
-// 职责边界: 移植自站点 src/parsers/claude.ts (口径 SSOT 在站点侧, 此处是 CLI 公开
+// 职责边界: 移植自 pricey-tokens-website 仓 site/src/parsers/claude.ts (口径 SSOT 在站点侧, 此处是 CLI 公开
 // 归宿), I/O 从浏览器 File 换为路径读取 (整文件缓冲, 与站点解析器同姿态); 解析语义逐字保持:
 //   - 逐行解析 type==="assistant" 记录的 message.model + message.usage 四件套;
 //   - 同 messageId (流式 chunk 重复携带累计 usage) 取最后一条 (去重);

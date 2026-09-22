@@ -1,8 +1,8 @@
 // types.ts — 本包共享类型契约 SSOT
 // 职责边界: 定义 收集器输出 (UsageRecord/ParseResult)、分享 payload (SharePayload)、
-// 上传档案 (ProfileV1) 三组契约。字段形态与站点 (pkgs/pricey-tokens src/types.ts +
-// src/share/hash.ts) 和 API (pkgs/pricey-tokens-api CONTRACT.md) 逐字对齐 — 三侧
-// 同构类型禁止在本包内重复声明, 修改须回写上游契约。
+// 上传档案 (ProfileV1) 三组契约。字段形态与站点 (pricey-tokens-website 仓
+// site/src/types.ts + site/src/share/hash.ts) 和 API (同仓 api/CONTRACT.md)
+// 逐字对齐 — 三侧同构类型禁止在本包内重复声明, 修改须回写上游契约。
 // 口径来源: 站点解析器 2026-09 实测迁移 (见各收集器头注)。
 
 // ===== 收集器输出 =====

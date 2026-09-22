@@ -1,7 +1,8 @@
 // collectors/opencode.ts — opencode 用量收集 (SQLite 双 schema, SQL 侧端口)
 // 职责边界: 读取 opencode SQLite (.db) 用量 → UsageRecord[]; schema 探测与口径
-// 端口自站点侧 export-usage.sh (pkgs/pricey-tokens/export-usage.sh, 行筛选在 SQLite
-// 侧完成 — 17GB 实测库亚秒级), TS 守卫与站点 src/parsers/opencode.ts 同键:
+// 移植自 lc-studio/nixos 的 export-usage.sh (该导出工具已退役, 本文件是口径 SSOT
+// 的公开归宿; 行筛选在 SQLite 侧完成 — 17GB 实测库亚秒级), TS 守卫与站点
+// (pricey-tokens-website 仓 site/src/parsers/opencode.ts) 同键:
 //   - 新 schema (session 表含 tokens_input 汇总列): 一行一 session 汇总; model JSON
 //     {id, providerID} → "providerID/id" 拼接 (单边缺省降级为单串, 双缺跳过); 时间列
 //     候选 updated_at / time_updated 双名; tokens_reasoning 并入 output (列缺失按 0)。

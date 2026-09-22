@@ -60,7 +60,7 @@ async function main(): Promise<number> {
   const noData = results.every((r) => r.records.length === 0);
   if (noData) {
     err(`\n窗口内 (${opts.days === "all" ? "全量" : `${opts.days} 天`}) 未收集到任何用量记录。`);
-    err("若你确实在用这些 agent, 检查数据目录权限或提 issue: https://github.com/luochen1990/pricey-tokens");
+    err("若你确实在用这些 agent, 检查数据目录权限或提 issue: https://github.com/ai-powered-labs/pricey-tokens");
     return 1;
   }
 

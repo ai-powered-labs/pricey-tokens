@@ -1,5 +1,5 @@
 // collectors/codex.ts — codex 用量收集 (~/.codex/sessions/**/rollout-*.jsonl)
-// 职责边界: 移植自站点 src/parsers/codex.ts (口径 SSOT 在站点侧, 此处是 CLI 公开
+// 职责边界: 移植自 pricey-tokens-website 仓 site/src/parsers/codex.ts (口径 SSOT 在站点侧, 此处是 CLI 公开
 // 归宿), I/O 从浏览器 File 换为路径读取 (整文件缓冲, 与站点解析器同姿态); 解析语义逐字保持:
 //   - 每 session 文件取**最后一条** token_count 事件的 info.total_token_usage 会话
 //     累计值 (事件值单调递增, 逐事件求和必然重复计数 — 核心不变量, 回归测试固化);

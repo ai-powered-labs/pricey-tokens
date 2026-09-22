@@ -250,6 +250,58 @@ describe("ProfileV2 发射 (形状 + 不变量 + 双路径同构)", () => {
     expect(days[0]!.models.map((m) => m.id)).toEqual(["big", "small"]);
     l.close();
   });
+
+  it("v2 字段集: outHist/nTurns/nToolCalls/maxCtxHist 形状与不变量 (ΣoutHist==nReq, ΣmaxCtxHist≤nSess)", async () => {
+    const home = await freshHome();
+    const l = await Ledger.open(home);
+    ingestBatch(l, [
+      row({reqKey: "a", sessKey: "sA", ts: T, inT: 100000, outT: 1500, nTools: 2}), // ctx 100000 桶5; out 1500 → outHist 桶1
+      row({reqKey: "b", sessKey: "sA", ts: T + 1000, inT: 5000, outT: 50, nTools: 1}), // ctx 5000 桶1; out 50 → outHist 桶0
+      row({reqKey: "c", sessKey: "sB", ts: T, inT: 300000, outT: 200000, nTools: 0}), // sB ctx 300000 → 桶7 (200k,256k]
+    ], [
+      {harness: "opencode", turnKey: "tA", sessKey: "sA"},
+      {harness: "opencode", turnKey: "tB", sessKey: "sB"},
+      {harness: "opencode", turnKey: "tB2", sessKey: "sB"},
+    ]);
+    const days = l.profileDays(null, []);
+    const m = days[0]!.models[0]!; // 唯一模型 zai/glm-5.3
+    expect(m.nReq).toBe(3);
+    expect(m.nToolCalls).toBe(3); // request 各归各 Σ
+    expect(m.nTurns).toBe(3); // 两会话轮次和 (1+2)
+    expect(m.outHist).toEqual([1, 1, 0, 0, 0, 0, 0, 0, 1]); // 50→桶0, 1500→桶1, 200000→桶8; Σ==nReq
+    expect(m.ctxHist.reduce((a, b) => a + b, 0)).toBe(3);
+    // 会话原子: sA max_ctx 100000 (桶5) + sB max_ctx 300000 (桶7), Σ=2 ≤ nSess=2
+    expect(m.maxCtxHist[5]).toBe(1);
+    expect(m.maxCtxHist[7]).toBe(1);
+    expect(m.maxCtxHist.reduce((a, b) => a + b, 0)).toBe(2);
+    expect(m.nSess).toBe(2);
+    l.close();
+  });
+
+  it("out_hist 落盘损坏 (Σ≠nReq) → 发射时抛错; max_ctx_hist 按日聚合越界 → 抛错", async () => {
+    const home = await freshHome();
+    const l = await Ledger.open(home);
+    ingestBatch(l, [row({reqKey: "a", ts: T, inT: 100000})]);
+    l.close();
+    const {createSqlite} = await import("../src/sqlite.js");
+    const db = await createSqlite(join(home, "pricey-tokens", "usage.db"));
+    db.exec(`UPDATE day_stats SET out_hist = '[0,0,0,0,0,0,0,0,0]'`); // Σ=0 ≠ nReq=1
+    db.close();
+    const l2 = await Ledger.open(home);
+    expect(() => l2.profileDays(null, [])).toThrow("out_hist 损坏");
+    l2.close();
+    // max_ctx_hist 聚合守卫: ΣmaxCtxHist(2) > ΣnSess(1) — 构造不可能态模拟外部改写
+    const home2 = await freshHome();
+    const l3 = await Ledger.open(home2);
+    ingestBatch(l3, [row({reqKey: "a", ts: T, inT: 100000})]);
+    l3.close();
+    const db2 = await createSqlite(join(home2, "pricey-tokens", "usage.db"));
+    db2.exec(`UPDATE day_stats SET max_ctx_hist = '[2,0,0,0,0,0,0,0,0,0,0,0]'`);
+    db2.close();
+    const l4 = await Ledger.open(home2);
+    expect(() => l4.profileDays(null, [])).toThrow("max_ctx_hist 损坏");
+    l4.close();
+  });
 });
 
 describe("sessionRollups (对账侧)", () => {

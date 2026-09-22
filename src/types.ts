@@ -59,16 +59,23 @@ export interface SharePayload {
 
 // ===== 上传档案 (ProfileV2 — day 粒度 + ctx 直方图 sketch) =====
 
-// 模型日行: 四分类 + 会话/请求计数 + 12 维 ctx 直方图 (契约冻结桶界见 ctx.ts)
+// 模型日行: 四分类 + 会话/请求计数 + 三张直方图 (契约冻结桶界见 ctx.ts)。
+// 字段集 v2 终态 (设计 §5): request 原子直方图 ctxHist/outHist (Σ==nReq),
+// 会话原子直方图 maxCtxHist (Σ ≤ nSess, 会话按 (last_ts 日, 主模型) 归因,
+// 一会话一增量), 加法标量 nTurns (会话归因) / nToolCalls (request 各归各)。
 export interface ProfileModelV2 {
   id: string; // 工具原始模型串 (引擎按裸 id 匹配 burnRate, 按原始串匹配 API 价)
   in: number;
   out: number;
   cr: number;
   cw: number;
-  nSess: number; // 该日该模型的去重会话数
+  nSess: number; // 该日该模型的去重会话数 (request 侧: 当日有该模型请求的会话)
   nReq: number; // 该日该模型的请求数
   ctxHist: number[]; // 12 维计数向量, 不变量 ΣctxHist == nReq
+  outHist: number[]; // 9 维计数向量 (单请求输出规模), 不变量 ΣoutHist == nReq
+  nTurns: number; // 用户轮次数 (会话归因: 主模型 × last_ts 日)
+  nToolCalls: number; // 工具调用数 (request 各归各: Σ requests.n_tools)
+  maxCtxHist: number[]; // 12 维计数向量 (会话最深上下文, 复用 ctx 桶表), ΣmaxCtxHist ≤ nSess (按日聚合保证)
 }
 
 export interface ProfileDayV2 {

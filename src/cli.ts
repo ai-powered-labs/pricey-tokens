@@ -121,7 +121,7 @@ async function main(): Promise<number> {
   }
 
   if (opts.upload) {
-    err("\n=== 将上传的完整内容 (ProfileV2, 日粒度模型四分类计数 + 会话/请求计数 + ctx 直方图桶计数, 无会话内容) ===\n");
+    err("\n=== 将上传的完整内容 (ProfileV2, 日粒度模型四分类计数 + 会话/请求/轮次/工具调用计数 + ctx/输出规模/会话最深上下文直方图桶计数, 无会话内容) ===\n");
     err(previewText(profile));
     err("\n=== 预览结束 ===\n");
     if (!(await confirmUpload(opts.yes))) {

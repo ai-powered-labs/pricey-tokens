@@ -14,7 +14,7 @@ import type {ProfileV2} from "../src/types.js";
 const profile: ProfileV2 = {
   schema: "pricey-tokens-profile/v2",
   harness: "opencode",
-  days: [{day: "2026-09-22", models: [{id: "zai/glm-5.3", in: 100, out: 10, cr: 200, cw: 0, nSess: 3, nReq: 7, ctxHist: [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}]}],
+  days: [{day: "2026-09-22", models: [{id: "zai/glm-5.3", in: 100, out: 10, cr: 200, cw: 0, nSess: 3, nReq: 7, ctxHist: [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], outHist: [7, 0, 0, 0, 0, 0, 0, 0, 0], nTurns: 2, nToolCalls: 11, maxCtxHist: [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]}]}],
   planUsed: null,
   collectedAt: Date.now(),
   toolVersion: "test",

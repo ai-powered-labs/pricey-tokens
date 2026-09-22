@@ -36,7 +36,7 @@ import {mkdir} from "node:fs/promises";
 import {join} from "node:path";
 import type {HarnessId, ProfileDayV2, ProfileModelV2, RequestRow, TurnRow, UsageRecord} from "./types.js";
 import {createSqlite, type SqliteRwDb, type SqliteStmt} from "./sqlite.js";
-import {CTX_BUCKET_COUNT, ctxBucketIndex, ctxEstimate, emptyCtxHist, emptyOutHist, outBucketIndex} from "./ctx.js";
+import {CTX_BUCKET_COUNT, ctxBucketIndex, ctxEstimate, emptyCtxHist, emptyOutHist, OUT_BUCKET_COUNT, outBucketIndex} from "./ctx.js";
 import {dayEndTs, dayStartTs, localDayKey} from "./day.js";
 
 export const SCHEMA_VERSION = "3";
@@ -521,12 +521,13 @@ export class Ledger {
 
   // ProfileV2 日行: day 对齐窗口。无 harness 过滤 → day_stats 直读 (物化热路径);
   // 有过滤 → requests + session_stats 现算 (day_stats 无 harness 维度, 过滤口径由
-  // 共用聚合核心保证与物化同构)
+  // 共用聚合核心保证与物化同构)。两路径共用 accToModelV2 发射与 sortProfileDays
+  // 出口守卫 (ΣctxHist==nReq / ΣoutHist==nReq 逐行, ΣmaxCtxHist≤ΣnSess 按日聚合)。
   profileDays(sinceDay: string | null, harnesses: readonly HarnessId[]): ProfileDayV2[] {
     if (harnesses.length === 0) {
       const rows = sinceDay === null
-        ? this.db.prepare("SELECT day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist FROM day_stats ORDER BY day").all()
-        : this.db.prepare("SELECT day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist FROM day_stats WHERE day >= ? ORDER BY day").all(sinceDay);
+        ? this.db.prepare("SELECT day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist, out_hist, n_turns, n_tools, max_ctx_hist FROM day_stats ORDER BY day").all()
+        : this.db.prepare("SELECT day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist, out_hist, n_turns, n_tools, max_ctx_hist FROM day_stats WHERE day >= ? ORDER BY day").all(sinceDay);
       const byDay = new Map<string, ProfileModelV2[]>();
       for (const r of rows) {
         const day = String(r.day);
@@ -536,6 +537,7 @@ export class Ledger {
           byDay.set(day, models);
         }
         const nReq = r.n_req as number;
+        const where = `day=${day} model=${String(r.model)}`;
         models.push({
           id: String(r.model),
           in: r.in_t as number,
@@ -544,13 +546,25 @@ export class Ledger {
           cw: r.cw_t as number,
           nSess: r.n_sess as number,
           nReq,
-          ctxHist: parseHist(String(r.ctx_hist), CTX_BUCKET_COUNT, nReq, "ctx_hist", `day=${day} model=${String(r.model)}`),
+          ctxHist: parseHist(String(r.ctx_hist), CTX_BUCKET_COUNT, nReq, "ctx_hist", where),
+          outHist: parseHist(String(r.out_hist), OUT_BUCKET_COUNT, nReq, "out_hist", where),
+          nTurns: r.n_turns as number,
+          nToolCalls: r.n_tools as number,
+          maxCtxHist: parseHist(String(r.max_ctx_hist), CTX_BUCKET_COUNT, null, "max_ctx_hist", where),
         });
       }
       return sortProfileDays(byDay);
     }
     const sinceTs = sinceDay === null ? 0 : dayStartTs(sinceDay);
     const grouped = groupRequestRows(this.requestsSince(sinceTs, harnesses));
+    // 会话归因贡献 (harness 过滤口径; day 对齐下界 — 会话 last_ts 早于窗口首日的
+    // 不进窗口, 与请求侧 dayStartTs 同界)
+    const sessRows = sinceDay === null
+      ? this.db.prepare(`SELECT day, model, n_turns, max_ctx FROM session_stats WHERE harness IN (${harnesses.map(() => "?").join(",")})`).all(...harnesses)
+      : this.db.prepare(`SELECT day, model, n_turns, max_ctx FROM session_stats WHERE day >= ? AND harness IN (${harnesses.map(() => "?").join(",")})`).all(sinceDay, ...harnesses);
+    for (const r of sessRows) {
+      mergeSessionContrib(grouped, String(r.day), String(r.model), r.n_turns as number, r.max_ctx as number);
+    }
     const byDay = new Map<string, ProfileModelV2[]>();
     for (const [day, byModel] of grouped) {
       byDay.set(day, [...byModel.entries()].map(([model, acc]) => accToModelV2(model, acc)));
@@ -594,11 +608,25 @@ function accToModelV2(model: string, acc: DayModelAcc): ProfileModelV2 {
     nSess: acc.sesses.size,
     nReq: acc.nReq,
     ctxHist: acc.ctxHist,
+    outHist: acc.outHist,
+    nTurns: acc.nTurns,
+    nToolCalls: acc.nTools,
+    maxCtxHist: acc.maxCtxHist,
   };
 }
 
-// ProfileV2 日行排序: day 升序, 模型按四分类总量降序 (大模型在前, 上传预览可读性)
+// ProfileV2 日行排序 + 发射出口守卫 (两路径共用漏斗): day 升序, 模型按四分类总量
+// 降序 (大模型在前, 上传预览可读性)。守卫: ΣmaxCtxHist 按日聚合 ≤ ΣnSess —
+// 会话末日必有当日请求 ⇒ 构造保证成立, 违规即 day_stats 落盘数据被外部改写
+// (逐行 ≤ 在 "跨日压缩+换模型续会话" 边缘形态不成立, 见模块头注, 故按日聚合)。
 function sortProfileDays(byDay: Map<string, ProfileModelV2[]>): ProfileDayV2[] {
+  for (const [day, models] of byDay) {
+    const histTotal = models.reduce((a, m) => a + m.maxCtxHist.reduce((x, y) => x + y, 0), 0);
+    const sessTotal = models.reduce((a, m) => a + m.nSess, 0);
+    if (histTotal > sessTotal) {
+      throw new Error(`day_stats max_ctx_hist 损坏 (day=${day}): ΣmaxCtxHist=${histTotal} > ΣnSess=${sessTotal}`);
+    }
+  }
   const days: ProfileDayV2[] = [...byDay.entries()].map(([day, models]) => ({
     day,
     models: models.sort((a, b) => b.in + b.out + b.cr + b.cw - (a.in + a.out + a.cr + a.cw)),

@@ -1,6 +1,13 @@
-# publish.yml — tag 触发 npm 发布
-# ⚠️ 需仓库 owner 配置: Settings → Secrets and variables → Actions → 添加
-# `NPM_TOKEN` (npmjs.com 的 Automation 类型 access token, 双因素认证下也能发布)。
+# publish.yml — tag 触发 npm 发布 (OIDC trusted publishing, 零密钥)
+# 认证: GitHub Actions OIDC → npm trusted publisher 短时凭证 (npm CLI ≥11.5.1 /
+# Node ≥22.14 自动探测 OIDC 环境, 无需任何 token secret); 公开仓+公开包 ⇒
+# provenance 徽章自动生成。
+# ⚠️ 一次性前置 (owner 操作):
+#   1. 首发必须手动 (trusted publisher 只能配在已存在的包上):
+#      npm login && npm publish (公开包, 从本仓 checkout 执行)
+#   2. npmjs.com → 包 Settings → Trusted Publisher → GitHub Actions:
+#      ai-powered-labs / pricey-tokens / publish.yml, 勾选允许 npm publish
+#   3. (推荐) 同页 Publishing access → "Require 2FA and disallow tokens"
 # 发布流程: push tag v* → 全量验证 (test/typecheck/build) → npm publish (public)。
 name: publish
 on:
@@ -9,10 +16,10 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # trusted publishing 仅支持云 runner (官方限制)
     permissions:
       contents: read
-      id-token: write # npm provenance (发布来源可追溯)
+      id-token: write # OIDC 短时凭证 (trusted publishing + provenance)
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -24,8 +31,6 @@ jobs:
       - run: bun run build
       - uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: "24" # npm CLI ≥11.5.1 (trusted publishing 硬要求)
           registry-url: https://registry.npmjs.org
-      - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access public # OIDC 自动认证, 无 token

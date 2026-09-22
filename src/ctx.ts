@@ -18,10 +18,10 @@
 //   (0,32k] (32k,64k] (64k,128k] (128k,∞)
 // 注: out=0 (纯输入请求) 计桶 0 — 不变量 ΣoutHist==nReq 要求每请求恰落一桶。
 //
-// DB 列名 (分析面独立列, 用户裁决 "db 无复合字段"): 每桶一列, 名 = gt<下界>
-// (桶 i 的下界 = i==0 ? 0 : edges[i-1]; gt200k = (200k,256k] 桶)。尾桶下界即
-// 末边值 (ctx_gt2m = (2M,∞))。count(>X) = Σ{列: 下界 ≥ X} 列 — 列名即阈值,
-// 尾和可读。JSON 契约 (传输面) 仍是数组, DB (分析面) 拆列 — 两面各按其职。
+// DB 列名 (分析面独立列, 用户裁决 "db 无复合字段"): 每桶一列, 名 = <前缀>_<下界>_<上界>
+// 的区间命名 (ctx_200k_256k = (200000, 256000] 桶; 末桶上界 inf)。count(>X) = Σ{列:
+// 下界 ≥ X} 列 — 列名即区间, 零心算。JSON 契约 (传输面) 仍是数组, DB (分析面) 拆列 —
+// 两面各按其职。
 
 export type CtxFamily = "anthropic" | "openai" | "unknown";
 
@@ -54,27 +54,30 @@ export function emptyOutHist(): number[] {
 
 // ===== DB 独立列名 (day_stats 分析面; 与桶表同源生成, 勿手抄) =====
 
-// 数值 → 列名后缀 (十进制 32k/200k/1m/2m 风格; 0 → "0")
-function boundSuffix(v: number): string {
+// 数值 → 列名段 (十进制 32k/200k/1m/2m 风格; 0 → "0")
+function boundTag(v: number): string {
   if (v === 0) return "0";
   if (v % 1_000_000 === 0) return `${v / 1_000_000}m`;
   if (v % 1000 === 0) return `${v / 1000}k`;
   return String(v);
 }
 
-// 桶 i 的下界 (i==0 → 0; 其余 → edges[i-1])
-function lowerBounds(edges: readonly number[]): number[] {
-  return Array.from({length: edges.length + 1}, (_, i) => (i === 0 ? 0 : edges[i - 1]!));
+// 桶 i 的区间标签 [下界段, 上界段] (下界 = i==0 ? 0 : edges[i-1]; 末桶上界 "inf")
+function intervalTags(edges: readonly number[]): Array<[string, string]> {
+  return Array.from({length: edges.length + 1}, (_, i) => [
+    boundTag(i === 0 ? 0 : edges[i - 1]!),
+    i < edges.length ? boundTag(edges[i]!) : "inf",
+  ]);
 }
 
-// ctx/maxCtx 直方图的 9 个列名 (前缀拼接): ctx_gt0, ctx_gt32k, ..., ctx_gt2m
-export const CTX_HIST_COLS: readonly string[] = lowerBounds(CTX_BUCKET_EDGES).map((b) => `ctx_gt${boundSuffix(b)}`);
+// ctx/maxCtx 直方图的 9 个列名: ctx_0_32k, ctx_32k_64k, ..., ctx_2m_inf
+export const CTX_HIST_COLS: readonly string[] = intervalTags(CTX_BUCKET_EDGES).map(([lo, hi]) => `ctx_${lo}_${hi}`);
 
-// outHist 的 4 个列名: out_gt0, out_gt32k, out_gt64k, out_gt128k
-export const OUT_HIST_COLS: readonly string[] = lowerBounds(OUT_BUCKET_EDGES).map((b) => `out_gt${boundSuffix(b)}`);
+// outHist 的 4 个列名: out_0_32k, out_32k_64k, out_64k_128k, out_128k_inf
+export const OUT_HIST_COLS: readonly string[] = intervalTags(OUT_BUCKET_EDGES).map(([lo, hi]) => `out_${lo}_${hi}`);
 
-// maxCtxHist 的 9 个列名: mctx_gt0, ..., mctx_gt2m
-export const MCTX_HIST_COLS: readonly string[] = lowerBounds(CTX_BUCKET_EDGES).map((b) => `mctx_gt${boundSuffix(b)}`);
+// maxCtxHist 的 9 个列名: mctx_0_32k, ..., mctx_2m_inf
+export const MCTX_HIST_COLS: readonly string[] = intervalTags(CTX_BUCKET_EDGES).map(([lo, hi]) => `mctx_${lo}_${hi}`);
 
 // model 串 → provider 家族。"providerID/modelId" 拼接串取首 "/" 拆段; 裸串整体
 // 视为 id 段。anthropic 判定在前 (claude* 永不落入 openai 的 o* 前缀误伤)。

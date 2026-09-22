@@ -15,10 +15,10 @@
 //     家族路由, TS 侧求值 — ctx.ts 是公式唯一来源, 严禁 SQL 侧复现)。恒等于 requests
 //     ∪ turn_events 的派生, 受影响会话重算自愈。
 //   - day_stats 表: day×model 物化 (n_req + n_tools + 三张直方图的**独立整数列**:
-//     ctx_gt* 9 桶 / out_gt* 4 桶 / mctx_gt* 9 桶 + 会话归因 n_turns — 分析面无复合
-//     字段, 用户裁决 2026-09-22; 列名 SSOT 在 ctx.ts, 与桶表同源生成), 增量摄取后
-//     只重算受影响日 (含会话归因日迁移), 直接从 requests ∪ session_stats 重聚合,
-//     精确归属。
+//     ctx_* 9 桶 / out_* 4 桶 / mctx_* 9 桶, 区间命名 ctx_200k_256k = (200000,256000]
+//     — 分析面无复合字段, 用户裁决 2026-09-22; 列名 SSOT 在 ctx.ts, 与桶表同源生成),
+//     增量摄取后只重算受影响日 (含会话归因日迁移), 直接从 requests ∪ session_stats
+//     重聚合, 精确归属。
 //   - meta 表: schema_version + 各源摄取水位线 (键契约见 ingest.ts)。
 // 会话归因规则 (设计 §5): 会话贡献 (max_ctx_hist + n_turns) 记 (last_ts 日, 主模型),
 // 一会话一增量无跨模型双计; n_tools/out_hist/ctx_hist 仍是 request 各归各 (日,模型)。
@@ -26,7 +26,7 @@
 // 聚合 ≤ ΣnSess (会话末日必有请求在当日); **逐行** ΣmaxCtxHist≤nSess 在 "跨日压缩 +
 // 换模型续会话" 边缘形态下不成立 (主模型当日无请求但会话末日在此日), 已知接受 —
 // 直方图会话原子性 (一会话恰一增量) 不受影响。
-// v2/v3→v4 迁移: (v2 加 requests.n_tools 列) + DROP day_stats 重建宽列形态 +
+// v2/v3/v4→v5 迁移: (v2 加 requests.n_tools 列) + DROP day_stats 重建宽列形态 +
 // 全量重算 session_stats/day_stats (从 requests 现算), 单事务原子; 存量行
 // n_tools/n_turns 无源数据 (水位线已过, 源不重扫) 恒 0, 新数据起全字段 —
 // max_ctx/mctx 列存量同样可从 requests 现算故真实回填。
@@ -43,7 +43,7 @@ import {createSqlite, type SqliteRwDb, type SqliteStmt} from "./sqlite.js";
 import {CTX_BUCKET_COUNT, ctxBucketIndex, ctxEstimate, CTX_HIST_COLS, emptyCtxHist, emptyOutHist, MCTX_HIST_COLS, OUT_BUCKET_COUNT, outBucketIndex, OUT_HIST_COLS} from "./ctx.js";
 import {dayEndTs, dayStartTs, localDayKey} from "./day.js";
 
-export const SCHEMA_VERSION = "4";
+export const SCHEMA_VERSION = "5";
 
 // 受影响会话引用 (重算编排的单位; Map key 序列化用 `${harness} ${sessKey}`)
 export interface SessRef {
@@ -281,15 +281,16 @@ export class Ledger {
       return ledger;
     }
     if (version === SCHEMA_VERSION) return new Ledger(db);
-    if (version === "2" || version === "3") return Ledger.migrateToV4(db, version);
+    if (version === "2" || version === "3" || version === "4") return Ledger.migrateToV5(db, version);
     db.close();
     throw new Error(`账本 schema 版本不符 (${version} ≠ ${SCHEMA_VERSION}): 删除 ${file} 后重跑可全量重建`);
   }
 
-  // v2/v3 → v4 迁移: (v2 补 requests.n_tools) + DROP day_stats 重建宽列形态 +
-  // 全量重算 (单事务原子 — 崩溃回滚保旧版可重试)。存量行 n_tools/n_turns 无源
-  // (水位线已过源不重扫, 见头注) 恒 0; 直方图/max_ctx 从 requests 现算真实回填。
-  private static migrateToV4(db: SqliteRwDb, from: string): Ledger {
+  // v2/v3/v4 → v5 迁移: (v2 补 requests.n_tools) + DROP day_stats 重建宽列形态 +
+  // 全量重算 (单事务原子 — 崩溃回滚保旧版可重试; v4→v5 仅列名改区间命名)。存量行
+  // n_tools/n_turns 无源 (水位线已过源不重扫, 见头注) 恒 0; 直方图/max_ctx 从
+  // requests 现算真实回填。
+  private static migrateToV5(db: SqliteRwDb, from: string): Ledger {
     db.exec("BEGIN");
     try {
       if (from === "2") db.exec("ALTER TABLE requests ADD COLUMN n_tools INTEGER NOT NULL DEFAULT 0");

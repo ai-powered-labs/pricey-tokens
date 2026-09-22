@@ -121,14 +121,14 @@ describe("outBucketIndex 桶界 (左开右闭, 4 桶, 32k 以下合桶)", () => 
   });
 });
 
-describe("DB 独立列名 (gt<下界> 命名, 分析面无复合字段)", () => {
-  it("ctx/mctx 列名 = 9 桶下界 (0,32k,64k,128k,200k,256k,512k,1m,2m)", () => {
-    expect(CTX_HIST_COLS).toEqual(["ctx_gt0", "ctx_gt32k", "ctx_gt64k", "ctx_gt128k", "ctx_gt200k", "ctx_gt256k", "ctx_gt512k", "ctx_gt1m", "ctx_gt2m"]);
-    expect(MCTX_HIST_COLS).toEqual(["mctx_gt0", "mctx_gt32k", "mctx_gt64k", "mctx_gt128k", "mctx_gt200k", "mctx_gt256k", "mctx_gt512k", "mctx_gt1m", "mctx_gt2m"]);
+describe("DB 独立列名 (区间命名 <前缀>_<下界>_<上界>, 分析面无复合字段)", () => {
+  it("ctx/mctx 列名 = 9 桶区间 (末桶上界 inf)", () => {
+    expect(CTX_HIST_COLS).toEqual(["ctx_0_32k", "ctx_32k_64k", "ctx_64k_128k", "ctx_128k_200k", "ctx_200k_256k", "ctx_256k_512k", "ctx_512k_1m", "ctx_1m_2m", "ctx_2m_inf"]);
+    expect(MCTX_HIST_COLS).toEqual(["mctx_0_32k", "mctx_32k_64k", "mctx_64k_128k", "mctx_128k_200k", "mctx_200k_256k", "mctx_256k_512k", "mctx_512k_1m", "mctx_1m_2m", "mctx_2m_inf"]);
   });
 
-  it("out 列名 = 4 桶下界; 列数与桶数一致", () => {
-    expect(OUT_HIST_COLS).toEqual(["out_gt0", "out_gt32k", "out_gt64k", "out_gt128k"]);
+  it("out 列名 = 4 桶区间; 列数与桶数一致", () => {
+    expect(OUT_HIST_COLS).toEqual(["out_0_32k", "out_32k_64k", "out_64k_128k", "out_128k_inf"]);
     expect(CTX_HIST_COLS.length).toBe(CTX_BUCKET_COUNT);
     expect(OUT_HIST_COLS.length).toBe(OUT_BUCKET_COUNT);
     expect(MCTX_HIST_COLS.length).toBe(CTX_BUCKET_COUNT);

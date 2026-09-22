@@ -128,10 +128,10 @@ $ bun run build     # tsc → dist/ (node ESM, bin shebang)
 
 ### 推送到远端
 
-仓库预期远端为 `github.com/luochen1990/pricey-tokens` (尚未创建)。owner 建仓后:
+仓库预期远端为 `github.com/ai-powered-labs/pricey-tokens`。owner 建仓后:
 
 ```console
-$ git remote add origin git@github.com:luochen1990/pricey-tokens.git
+$ git remote add origin git@github.com:ai-powered-labs/pricey-tokens.git
 $ git push -u origin master
 ```
 

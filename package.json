@@ -39,6 +39,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+ssh://github.com/luochen1990/pricey-tokens.git"
+    "url": "git+ssh://github.com/ai-powered-labs/pricey-tokens.git"
   }
 }

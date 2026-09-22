@@ -25,9 +25,11 @@
 
 export type CtxFamily = "anthropic" | "openai" | "unknown";
 
-// 桶上界表 (末桶无上界); 长度 = 桶数 - 1
+// 桶上界表 (末桶无上界); 长度 = 桶数 - 1。**十进制档** (k=10³): 与套餐限额
+// (200k = 200,000 tokens 等) 精确对齐 — 尾桶求和即超限计数, 无插值误差;
+// 与 API 侧 site/src/types.ts CTX_HIST_BOUNDS 逐值相同 (跨端一致是硬约束)
 export const CTX_BUCKET_EDGES: readonly number[] = [
-  32768, 65536, 131072, 204800, 262144, 524288, 1048576, 2097152,
+  32000, 64000, 128000, 200000, 256000, 512000, 1000000, 2000000,
 ] as const;
 
 export const CTX_BUCKET_COUNT = CTX_BUCKET_EDGES.length + 1; // 9
@@ -39,9 +41,9 @@ export function emptyCtxHist(): number[] {
 
 // ===== outHist 输出规模直方图 (4 桶) =====
 
-// 桶上界表 (末桶无上界); 长度 = 桶数 - 1
+// 桶上界表 (末桶无上界); 长度 = 桶数 - 1 (十进制档, 同 CTX 注记)
 export const OUT_BUCKET_EDGES: readonly number[] = [
-  32768, 65536, 131072,
+  32000, 64000, 128000,
 ] as const;
 
 export const OUT_BUCKET_COUNT = OUT_BUCKET_EDGES.length + 1; // 4
@@ -52,11 +54,11 @@ export function emptyOutHist(): number[] {
 
 // ===== DB 独立列名 (day_stats 分析面; 与桶表同源生成, 勿手抄) =====
 
-// 数值 → 列名后缀 (32k/200k/1m/2m 风格; 0 → "0")
+// 数值 → 列名后缀 (十进制 32k/200k/1m/2m 风格; 0 → "0")
 function boundSuffix(v: number): string {
   if (v === 0) return "0";
-  if (v % 1048576 === 0) return `${v / 1048576}m`;
-  if (v % 1024 === 0) return `${v / 1024}k`;
+  if (v % 1_000_000 === 0) return `${v / 1_000_000}m`;
+  if (v % 1000 === 0) return `${v / 1000}k`;
   return String(v);
 }
 

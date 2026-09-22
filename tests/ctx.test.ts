@@ -55,20 +55,20 @@ describe("ctxEstimate 公式 (契约冻结)", () => {
 
 describe("ctxBucketIndex 桶界 (左开右闭, 9 桶, 32k 以下合桶)", () => {
   it("桶边界表 = 契约冻结值", () => {
-    expect(CTX_BUCKET_EDGES).toEqual([32768, 65536, 131072, 204800, 262144, 524288, 1048576, 2097152]);
+    expect(CTX_BUCKET_EDGES).toEqual([32000, 64000, 128000, 200000, 256000, 512000, 1000000, 2000000]); // 十进制档, 与 API 侧 CTX_HIST_BOUNDS 逐值相同
     expect(CTX_BUCKET_COUNT).toBe(9);
   });
 
-  it("边界值属下侧桶: (0,32k]→0, 32769→1, 桶界值即该桶上界", () => {
+  it("边界值属下侧桶: (0,32k]→0, 32001→1, 桶界值即该桶上界 (十进制)", () => {
     expect(ctxBucketIndex(1)).toBe(0);
-    expect(ctxBucketIndex(32768)).toBe(0);
-    expect(ctxBucketIndex(32769)).toBe(1);
-    expect(ctxBucketIndex(65536)).toBe(1);
-    expect(ctxBucketIndex(131072)).toBe(2);
-    expect(ctxBucketIndex(204800)).toBe(3); // 128k~200k 桶的上界
-    expect(ctxBucketIndex(204801)).toBe(4); // 200k~256k (套餐语境档)
-    expect(ctxBucketIndex(2097152)).toBe(7); // (1M,2M]
-    expect(ctxBucketIndex(2097153)).toBe(8); // (2M,∞)
+    expect(ctxBucketIndex(32000)).toBe(0);
+    expect(ctxBucketIndex(32001)).toBe(1);
+    expect(ctxBucketIndex(64000)).toBe(1);
+    expect(ctxBucketIndex(128000)).toBe(2);
+    expect(ctxBucketIndex(200000)).toBe(3); // 128k~200k 桶的上界 (套餐 200k 限额精确对齐)
+    expect(ctxBucketIndex(200001)).toBe(4); // 200k~256k (超限首桶)
+    expect(ctxBucketIndex(2000000)).toBe(7); // (1M,2M]
+    expect(ctxBucketIndex(2000001)).toBe(8); // (2M,∞)
     expect(ctxBucketIndex(1e12)).toBe(8);
   });
 
@@ -90,18 +90,18 @@ describe("ctxBucketIndex 桶界 (左开右闭, 9 桶, 32k 以下合桶)", () => 
 
 describe("outBucketIndex 桶界 (左开右闭, 4 桶, 32k 以下合桶)", () => {
   it("桶边界表 = 契约冻结值", () => {
-    expect(OUT_BUCKET_EDGES).toEqual([32768, 65536, 131072]);
+    expect(OUT_BUCKET_EDGES).toEqual([32000, 64000, 128000]);
     expect(OUT_BUCKET_COUNT).toBe(4);
   });
 
-  it("边界值属左桶: 0→0, 32768→0, 32769→1, 末桶无上界", () => {
+  it("边界值属左桶: 0→0, 32000→0, 32001→1, 末桶无上界 (十进制)", () => {
     expect(outBucketIndex(0)).toBe(0); // 纯输入请求计桶 0 (ΣoutHist==nReq 要求)
     expect(outBucketIndex(1)).toBe(0);
-    expect(outBucketIndex(32768)).toBe(0);
-    expect(outBucketIndex(32769)).toBe(1);
-    expect(outBucketIndex(65536)).toBe(1);
-    expect(outBucketIndex(131072)).toBe(2);
-    expect(outBucketIndex(131073)).toBe(3); // (128k,∞)
+    expect(outBucketIndex(32000)).toBe(0);
+    expect(outBucketIndex(32001)).toBe(1);
+    expect(outBucketIndex(64000)).toBe(1);
+    expect(outBucketIndex(128000)).toBe(2);
+    expect(outBucketIndex(128001)).toBe(3); // (128k,∞)
     expect(outBucketIndex(1e9)).toBe(3);
   });
 

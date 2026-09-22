@@ -1,20 +1,23 @@
 // types.ts — 本包共享类型契约 SSOT
-// 职责边界: 定义 收集器输出 (UsageRecord/ParseResult)、分享 payload (SharePayload)、
-// 上传档案 (ProfileV1) 三组契约。字段形态与站点 (pricey-tokens-website 仓
-// site/src/types.ts + site/src/share/hash.ts) 和 API (同仓 api/CONTRACT.md)
-// 逐字对齐 — 三侧同构类型禁止在本包内重复声明, 修改须回写上游契约。
-// 口径来源: 站点解析器 2026-09 实测迁移 (见各收集器头注)。
+// 职责边界: 定义 收集器输出 (RequestRow — request 粒度账本行)、分享 payload
+// (SharePayload)、上传档案 (ProfileV2) 三组契约。SharePayload 字段形态与站点
+// (pricey-tokens-website 仓 site/src/types.ts + site/src/share/hash.ts) 逐字对齐
+// — 站点比特兼容面, 修改须回写上游契约; ProfileV2 与 API 契约 (同仓
+// api/CONTRACT.md) 对齐。口径来源: 站点解析器 2026-09 实测迁移 (见各收集器头注)。
 
-// ===== 收集器输出 =====
+// ===== 收集器输出 (request 粒度, 归并进账本的原子) =====
 
-// 单条用量聚合 (收集器按 session / 消息 / 日粒度聚合输出, 见各收集器头注)
-export interface UsageRecord {
+// 单条 API 请求的用量 (账本 requests 表的行形态; 请求不可变 ⇒ 归并幂等)
+export interface RequestRow {
+  harness: HarnessId;
+  reqKey: string; // 归并键: claude=messageId / codex=rollout 文件名+事件序 / opencode=库名+rowid
+  sessKey: string; // 会话归属 (对账 + n_sess 派生用)
   model: string; // 工具原始模型串; opencode 统一为 "providerID/modelId" 拼接
-  ts: number; // epoch ms
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
+  ts: number; // 请求真实时刻 epoch ms
+  inT: number;
+  outT: number;
+  crT: number;
+  cwT: number;
 }
 
 export type HarnessId = "opencode" | "claude-code" | "codex";
@@ -23,10 +26,14 @@ export type HarnessId = "opencode" | "claude-code" | "codex";
 // "--harness 拒绝但探测支持" 或反之的静默不一致); 新增 harness 时改此处 + 各分发点
 export const ALL_HARNESSES: readonly HarnessId[] = ["opencode", "claude-code", "codex"];
 
-export interface ParseResult {
-  harness: HarnessId;
-  records: UsageRecord[]; // 未匹配模型的原始串原样保留 (匹配是站点引擎的事)
-  skippedFiles: string[]; // 无法解析的文件, 含原因后缀
+// 日粒度聚合记录 (分享 hash 的载荷; 账本窗口查询派生, 形态与站点解析器输出同构)
+export interface UsageRecord {
+  model: string; // 工具原始模型串; opencode 统一为 "providerID/modelId" 拼接
+  ts: number; // epoch ms (日粒度聚合时 = 当日该模型最后活跃时刻)
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 // ===== 分享 payload (站点 /calc #u= 比特兼容契约) =====
@@ -40,21 +47,29 @@ export interface SharePayload {
   pasteLike: boolean;
 }
 
-// ===== 上传档案 (CONTRACT.md §1 冻结面) =====
+// ===== 上传档案 (ProfileV2 — day 粒度 + ctx 直方图 sketch) =====
 
-export interface ProfileModelV1 {
+// 模型日行: 四分类 + 会话/请求计数 + 12 维 ctx 直方图 (契约冻结桶界见 ctx.ts)
+export interface ProfileModelV2 {
   id: string; // 工具原始模型串 (引擎按裸 id 匹配 burnRate, 按原始串匹配 API 价)
-  inputT: number; // 月化输入 token 速率 (tokens/月, 由收集器按 spanDays 外推)
-  outputT: number;
-  cacheReadT: number;
-  cacheWriteT: number;
+  in: number;
+  out: number;
+  cr: number;
+  cw: number;
+  nSess: number; // 该日该模型的去重会话数
+  nReq: number; // 该日该模型的请求数
+  ctxHist: number[]; // 12 维计数向量, 不变量 ΣctxHist == nReq
 }
 
-export interface ProfileV1 {
-  schema: "pricey-tokens-profile/v1";
+export interface ProfileDayV2 {
+  day: string; // 本地日 "YYYY-MM-DD"
+  models: ProfileModelV2[];
+}
+
+export interface ProfileV2 {
+  schema: "pricey-tokens-profile/v2";
   harness: string; // 用量归属 harness 工具 (单源 = 源名; 多源混合 = "mixed")
-  spanDays: number; // 数据时间跨度 (天, int), 倍数月化的分母
-  models: ProfileModelV1[];
+  days: ProfileDayV2[]; // 窗口内日行 (day 升序, 模型按用量降序)
   planUsed?: string | null;
   collectedAt: number; // epoch ms
   toolVersion: string;

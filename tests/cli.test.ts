@@ -94,9 +94,36 @@ describe("cli 数据出口", () => {
       const r = await runCli(["--json", "--days", "7"], h.env);
       expect(r.code).toBe(0);
       const profile = JSON.parse(r.stdout); // stdout 纯 JSON (任何诊断混入都会炸)
-      expect(profile.schema).toBe("pricey-tokens-profile/v1");
+      expect(profile.schema).toBe("pricey-tokens-profile/v2");
       expect(profile.harness).toBe("claude-code");
+      expect(profile.days).toHaveLength(1);
+      const m = profile.days[0].models[0];
+      expect(m.id).toBe("claude-sonnet-5");
+      expect(m.in).toBe(100);
+      expect(m.nReq).toBe(1);
+      expect(m.ctxHist.reduce((a: number, b: number) => a + b, 0)).toBe(1); // Σhist==nReq
       expect(r.stderr).toContain("[claude-code]");
+      expect(r.stderr).toContain("账本"); // 账本累计报告
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("有数据: 二跑增量秒级路径 — 未变文件零重收且输出等价 (账本幂等)", async () => {
+    const h = await emptyHome();
+    try {
+      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
+        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 3600000}),
+      ]);
+      const r1 = await runCli(["--json", "--days", "7"], h.env);
+      const r2 = await runCli(["--json", "--days", "7"], h.env);
+      expect(r2.code).toBe(0);
+      expect(r2.stderr).toContain("重收 0");
+      expect(r2.stderr).toContain("+0");
+      const p1 = JSON.parse(r1.stdout);
+      const p2 = JSON.parse(r2.stdout);
+      p2.collectedAt = p1.collectedAt; // 时戳外逐字段等价
+      expect(p2).toEqual(p1);
     } finally {
       await h.cleanup();
     }
@@ -111,6 +138,39 @@ describe("cli 数据出口", () => {
       const r = await runCli(["--days", "7", "--site", "http://localhost:19999/calc/"], h.env);
       expect(r.code).toBe(0);
       expect(r.stdout.trim()).toMatch(/^http:\/\/localhost:19999\/calc\/#u=/);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("成功过滤: isApiErrorMessage 行不进任何出口", async () => {
+    const h = await emptyHome();
+    try {
+      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
+        claudeAssistant({msgId: "ok", input: 100, output: 10, ts: Date.now() - 3600000}),
+        claudeAssistant({msgId: "err", input: 9999, output: 99, ts: Date.now() - 3600000, isApiError: true}),
+      ]);
+      const r = await runCli(["--json", "--days", "7"], h.env);
+      const m = JSON.parse(r.stdout).days[0].models[0];
+      expect(m.in).toBe(100);
+      expect(m.nReq).toBe(1);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("--harness 过滤: 只收集指定源 (端到端, harness 字段 = 源名)", async () => {
+    const h = await emptyHome();
+    try {
+      await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
+        claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 86400000}),
+      ]);
+      const r = await runCli(["--json", "--days", "7", "--harness", "claude-code"], h.env);
+      expect(r.code).toBe(0);
+      const profile = JSON.parse(r.stdout);
+      expect(profile.harness).toBe("claude-code");
+      expect(profile.days[0].models[0].id).toBe("claude-sonnet-5");
+      // 其余源未发现但 claude-code 有数据 → exit 0
     } finally {
       await h.cleanup();
     }

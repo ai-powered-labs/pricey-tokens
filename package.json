@@ -1,6 +1,6 @@
 {
   "name": "pricey-tokens",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local AI coding agent token usage collector — aggregates opencode / claude-code / codex usage into a shareable profile for pricey-tokens",
   "type": "module",
   "license": "MIT",
@@ -27,7 +27,7 @@
     "typescript": "^5.6.0"
   },
   "engines": {
-    "node": ">=20.10"
+    "node": ">=22.5"
   },
   "keywords": [
     "ai",

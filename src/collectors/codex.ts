@@ -1,17 +1,24 @@
-// collectors/codex.ts — codex 用量收集 (~/.codex/sessions/**/rollout-*.jsonl)
-// 职责边界: 移植自 pricey-tokens-website 仓 site/src/parsers/codex.ts (口径 SSOT 在站点侧, 此处是 CLI 公开
-// 归宿), I/O 从浏览器 File 换为路径读取 (整文件缓冲, 与站点解析器同姿态); 解析语义逐字保持:
-//   - 每 session 文件取**最后一条** token_count 事件的 info.total_token_usage 会话
-//     累计值 (事件值单调递增, 逐事件求和必然重复计数 — 核心不变量, 回归测试固化);
-//   - total_token_usage 缺失时回退 last_token_usage 差分累加;
-//   - model 取 turn_context 事件最后出现的值 (短会话可能连 turn_context 都没有 → "unknown");
-//   - 无 token_count 的文件 (旧格式 / 过短会话) 整文件进 skippedFiles 附原因;
-//   - cached_input_tokens → cacheRead (codex 无 cache 写入概念, cacheWrite 恒 0)。
-// 窗口过滤 (sinceMs): 按会话记录 ts (= 最后 token_count 时刻) 过滤 — 会话粒度天然
-// 整体进出窗口 (无会话内拆分语义)。
+// collectors/codex.ts — codex 请求收集 (~/.codex/sessions/**/rollout-*.jsonl)
+// 职责边界: rollout jsonl → RequestRow[] (request 粒度)。事件语义移植自站点侧解析器
+// (口径 SSOT 在站点侧), 账本口径下从"会话累计末值"改为逐事件 request 粒度:
+//   - 每 token_count 事件 = 一次 API 请求: tokens 取 info.last_token_usage (该次
+//     请求的增量); last 缺失时回退相邻 total_token_usage 差分 (total 是会话累计
+//     计数器, 差分即该次增量; 首事件差分基线为 0);
+//   - 差分为负 (计数器回退/重置) 视为数据异常, 该事件跳过且差分基线重同步;
+//   - **成功过滤**: codex 的错误请求不产生 token_count 事件, "tokens 在场"即成功
+//     判定本身; 四分类全零行不入账本;
+//   - model 取该事件之前最后出现的 turn_context 值 (短会话可能连 turn_context
+//     都没有 → "unknown");
+//   - ts 取事件包装行的 timestamp; 无 timestamp 的事件沿用文件内最近可解析时刻
+//     (事件流单调), 全程无可解析时刻的事件才跳过;
+//   - 无 token_count 的文件 (旧格式 / 过短会话) 整文件进 skipped 附原因 (编排层)。
+// 归并键: reqKey = "<rollout 文件名>#<文件内 token_count 事件序号 (1 起)>";
+// sessKey = rollout 文件名 (文件即会话)。cached_input_tokens → cacheRead
+// (codex 无 cache 写入概念, cacheWrite 恒 0)。
+import {basename} from "node:path";
 import {readFile} from "node:fs/promises";
-import type {ParseResult, UsageRecord} from "../types.js";
-import {errMsg, isObj, posNum} from "../guards.js";
+import type {RequestRow} from "../types.js";
+import {isObj, posNum} from "../guards.js";
 
 interface TokenUsage {
   input: number;
@@ -26,18 +33,31 @@ function normUsage(v: unknown): TokenUsage | null {
   return {input: g("input_tokens"), cached: g("cached_input_tokens"), output: g("output_tokens")};
 }
 
-const addUsage = (a: TokenUsage | null, b: TokenUsage): TokenUsage =>
-  a ? {input: a.input + b.input, cached: a.cached + b.cached, output: a.output + b.output} : b;
+// 事件增量的三来源优先级: last 直给 > total 差分 > 无 (跳过)
+function eventDelta(last: TokenUsage | null, total: TokenUsage | null, prevTotal: TokenUsage | null): TokenUsage | null {
+  if (last) return last;
+  if (!total) return null;
+  const base = prevTotal ?? {input: 0, cached: 0, output: 0};
+  const d = {input: total.input - base.input, cached: total.cached - base.cached, output: total.output - base.output};
+  return d.input < 0 || d.cached < 0 || d.output < 0 ? null : d; // 负差分 = 计数器异常
+}
 
-// 单文件解析 → 会话级 UsageRecord | null (附跳过原因)
-async function collectFile(path: string): Promise<{rec: UsageRecord; skipped: null} | {rec: null; skipped: string}> {
+export interface CodexFileResult {
+  rows: RequestRow[];
+  skipped: string | null; // 无 token 数据的文件附原因 (含文件短名前缀)
+}
+
+// 单文件收集: 读文件 → 该会话全部请求行, 或跳过原因 (读取失败由编排层兜为 skipped)
+export async function collectCodexRequests(path: string): Promise<CodexFileResult> {
   const displayName = path.replace(/^.*\.codex\/sessions\//, ""); // 相对 sessions 的短名
   const text = await readFile(path, "utf8");
-  let lastTotal: TokenUsage | null = null; // total_token_usage: 会话累计值, 只留末值
-  let sumLast: TokenUsage | null = null; // last_token_usage: 单事件增量, 累加 (回退路径)
-  let model = ""; // turn_context 最后出现的模型
-  let ts = 0; // 最后一条 token_count 事件时刻 (累计值的测量点)
-  let sawWrapper = false; // 是否见过新格式 wrapper 行 (旧格式行也有顶层裸 type, 须按三件套判别)
+  const fileBase = basename(displayName).replace(/\.jsonl$/, "");
+  let lastTotal: TokenUsage | null = null; // 最近一次 total_token_usage (差分基线)
+  let model = ""; // turn_context 最后出现的模型 (运行值)
+  let ts = 0; // 最近可解析的事件时刻 (运行值)
+  let eventSeq = 0; // token_count 事件序号 (reqKey 组成)
+  let sawAnyTokenEvent = false;
+  const rows: RequestRow[] = [];
   for (const rawLine of text.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -45,10 +65,9 @@ async function collectFile(path: string): Promise<{rec: UsageRecord; skipped: nu
     try {
       o = JSON.parse(line);
     } catch {
-      continue; // 坏行静默跳过 (事件流非计费面, 单行损坏不影响累计值语义)
+      continue; // 坏行静默跳过 (事件流非计费面, 单行损坏不影响其他事件)
     }
     if (!isObj(o) || typeof o.type !== "string") continue;
-    if (typeof o.timestamp === "string" && isObj(o.payload)) sawWrapper = true;
     if (o.type === "turn_context") {
       const p = o.payload;
       if (isObj(p) && typeof p.model === "string" && p.model !== "") model = p.model;
@@ -57,48 +76,33 @@ async function collectFile(path: string): Promise<{rec: UsageRecord; skipped: nu
       if (!isObj(p) || p.type !== "token_count") continue;
       const info = isObj(p.info) ? p.info : null;
       if (!info) continue;
-      const total = normUsage(info.total_token_usage);
-      if (total) lastTotal = total; // 累计值: 后者覆盖前者 (严禁求和)
-      const last = normUsage(info.last_token_usage);
-      if (last) sumLast = addUsage(sumLast, last);
       if (typeof o.timestamp === "string") {
         const t = Date.parse(o.timestamp);
         if (Number.isFinite(t)) ts = t;
       }
+      const total = normUsage(info.total_token_usage);
+      const delta = eventDelta(normUsage(info.last_token_usage), total, lastTotal);
+      if (total) lastTotal = total; // 差分基线前进 (无论本事件是否可计)
+      eventSeq += 1;
+      if (delta === null) continue; // 无增量信息 (非错误, 该事件不构成请求行)
+      sawAnyTokenEvent = true;
+      if (delta.input === 0 && delta.cached === 0 && delta.output === 0) continue; // 全零非用量
+      if (ts <= 0) continue; // 无法归属时刻的请求无法归属日, 跳过
+      rows.push({
+        harness: "codex",
+        reqKey: `${fileBase}#${eventSeq}`,
+        sessKey: fileBase,
+        model: model !== "" ? model : "unknown",
+        ts,
+        inT: delta.input,
+        outT: delta.output,
+        crT: delta.cached,
+        cwT: 0,
+      });
     }
   }
-  const usage = lastTotal ?? sumLast;
-  if (!usage) {
-    return {rec: null, skipped: `${displayName} (${sawWrapper ? "会话无 token_count 事件" : "旧格式无 token 数据"})`};
+  if (!sawAnyTokenEvent) {
+    return {rows, skipped: `${displayName} (会话无可用 token_count 事件)`};
   }
-  return {
-    rec: {
-      model: model !== "" ? model : "unknown",
-      ts,
-      inputTokens: usage.input,
-      outputTokens: usage.output,
-      cacheReadTokens: usage.cached,
-      cacheWriteTokens: 0,
-    },
-    skipped: null,
-  };
-}
-
-export async function collectCodex(paths: string[], sinceMs: number | null): Promise<ParseResult> {
-  const records: UsageRecord[] = [];
-  const skippedFiles: string[] = [];
-  for (const path of paths) {
-    try {
-      const {rec, skipped} = await collectFile(path);
-      if (skipped !== null) {
-        skippedFiles.push(skipped);
-        continue;
-      }
-      if (sinceMs !== null && rec.ts < sinceMs) continue; // 会话整体出窗 → 静默不计
-      records.push(rec);
-    } catch (e) {
-      skippedFiles.push(`${path} (${errMsg(e)})`);
-    }
-  }
-  return {harness: "codex", records, skippedFiles};
+  return {rows, skipped: null};
 }

@@ -9,13 +9,12 @@ import {join} from "node:path";
 import {mkdtemp} from "node:fs/promises";
 import {confirmUpload, uploadProfile} from "../src/upload.js";
 import {loadOrCreateDeviceKey} from "../src/device-key.js";
-import type {ProfileV1} from "../src/types.js";
+import type {ProfileV2} from "../src/types.js";
 
-const profile: ProfileV1 = {
-  schema: "pricey-tokens-profile/v1",
+const profile: ProfileV2 = {
+  schema: "pricey-tokens-profile/v2",
   harness: "opencode",
-  spanDays: 30,
-  models: [{id: "zai/glm-5.3", inputT: 100, outputT: 10, cacheReadT: 200, cacheWriteT: 0}],
+  days: [{day: "2026-09-22", models: [{id: "zai/glm-5.3", in: 100, out: 10, cr: 200, cw: 0, nSess: 3, nReq: 7, ctxHist: [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}]}],
   planUsed: null,
   collectedAt: Date.now(),
   toolVersion: "test",

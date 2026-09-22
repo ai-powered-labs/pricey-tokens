@@ -1,20 +1,25 @@
 #!/usr/bin/env node
 // cli.ts — pricey-tokens CLI 入口与三种出口模式的编排
-// 职责边界: 参数解析 (args) → 探测收集 (discover) → 聚合 (aggregate) → 按模式出口:
-//   - 默认: 构造站点分享 hash → 打开浏览器 (CLI 的核心体验: 一条命令看到换算结果)
-//   - --json: ProfileV1 JSON 到 stdout (纯净输出, 诊断走 stderr)
-//   - --upload: 完整预览 payload → 确认 → POST → (--share 打印分享 URL)
+// 职责边界: 参数解析 (args) → 增量摄取 (ingest → ledger, 全历史水位线增量, 与窗口
+// 无关) → 账本窗口查询 → 按模式出口:
+//   - 默认: 日粒度记录 → 站点分享 hash → 打开浏览器 (CLI 的核心体验: 一条命令看到
+//     换算结果; #u= 比特兼容契约不变)
+//   - --json: ProfileV2 JSON 到 stdout (day 粒度 + ctx 直方图)
+//   - --upload: 完整预览 payload (ProfileV2) → 确认 → POST → (--share 打印分享 URL)
 // stdout 纪律: --json 模式下 stdout 只有 JSON; 人类可读摘要/警告一律 stderr 或
 // 非 json 模式的 stdout。退出码: 0 成功 / 1 可预期失败 (无数据/参数错/上传失败)。
 import {parseArgs, ArgsError, HELP_TEXT} from "./args.js";
-import {collectAll} from "./discover.js";
-import {aggregate} from "./aggregate.js";
+import {ingestAll} from "./ingest.js";
+import {Ledger} from "./ledger.js";
+import {localDayKey} from "./day.js";
 import {encodeShare, sharePayloadOf, buildShareUrl, HASH_WARN_BYTES} from "./share.js";
 import {previewText, confirmUpload, uploadProfile} from "./upload.js";
 import {loadOrCreateDeviceKey} from "./device-key.js";
 import {openUrl} from "./browser.js";
+import {dataHome} from "./discover.js";
 import {createRequire} from "node:module";
 import {errMsg} from "./guards.js";
+import type {ProfileV2} from "./types.js";
 
 const require = createRequire(import.meta.url);
 const VERSION: string = (require("../package.json") as {version: string}).version;
@@ -48,38 +53,75 @@ async function main(): Promise<number> {
     throw e;
   }
 
+  // ① 增量摄取: 账本 = 唯一数据源, 摄取与窗口无关 (首跑全量分钟级, 之后秒级)
+  const home = (await import("node:os")).homedir();
+  const dataRoot = dataHome(home); // opencode 源与账本共用此根
+  // ② 窗口参数 (摄取前定死 — 查询与出口共用)
   const sinceMs = opts.days === "all" ? null : Date.now() - opts.days * 86400000;
-  const {results, statuses} = await collectAll({harnesses: opts.harnesses, sinceMs});
+  const sinceDay = sinceMs === null ? null : localDayKey(sinceMs);
+  let daily: ReturnType<Ledger["dailyRecords"]>;
+  let days: ReturnType<Ledger["profileDays"]>;
+  let harness = "mixed";
+  let report;
+  {
+    let ledger: Ledger;
+    try {
+      ledger = await Ledger.open(dataRoot);
+    } catch (e) {
+      err(`账本打开失败: ${errMsg(e)}`);
+      return 1;
+    }
+    try {
+      report = await ingestAll(ledger, {harnesses: opts.harnesses, home, dataRoot});
+      daily = ledger.dailyRecords(sinceMs, opts.harnesses);
+      days = ledger.profileDays(sinceDay, opts.harnesses);
+      const harnessSet = ledger.distinctHarnesses(sinceDay, opts.harnesses);
+      if (harnessSet.length === 1) harness = harnessSet[0]!;
+    } finally {
+      ledger.close(); // 摄取+查询完毕即关库; 出口 (上传/浏览器) 不再需要账本
+    }
+  }
 
   // 探测报告 (stderr — 保持 --json 的 stdout 纯净)
-  for (const s of statuses) {
+  for (const s of report.statuses) {
     err(`[${s.harness}] ${s.found ? "✓" : "✗ 未发现"} ${s.detail}`);
   }
-  const skipped = results.flatMap((r) => r.skippedFiles);
-  for (const s of skipped) err(`[skip] ${s}`);
-  const noData = results.every((r) => r.records.length === 0);
-  if (noData) {
+  for (const s of report.skipped) err(`[skip] ${s}`);
+  for (const w of report.warnings) err(w);
+  err(`\n账本: ${report.total} 请求累计 (本次新增 +${report.inserted})`);
+
+  if (days.length === 0) {
+    // 空数据判定只用 day 对齐窗口 (ts 精确窗口是其子集 — 窗口首日 00:00 到
+    // sinceMs 间的用量只可能出现在 days 而不在 daily, 杂交判定会误报空)
     err(`\n窗口内 (${opts.days === "all" ? "全量" : `${opts.days} 天`}) 未收集到任何用量记录。`);
     err("若你确实在用这些工具, 检查数据目录权限或提 issue: https://github.com/ai-powered-labs/pricey-tokens");
     return 1;
   }
 
-  const agg = aggregate(results, VERSION);
-  if (agg === null) {
-    err("聚合失败: 无有效记录");
-    return 1;
-  }
-  const {profile, span} = agg;
-  err(`\n聚合: ${profile.models.length} 个模型, 跨度 ${profile.spanDays} 天 (${new Date(span.firstTs).toISOString().slice(0, 10)} ~ ${new Date(span.lastTs).toISOString().slice(0, 10)}), harness=${profile.harness}`);
+  const modelCount = new Set(days.flatMap((d) => d.models.map((m) => m.id))).size;
+  const firstDay = days[0]!.day;
+  const lastDay = days[days.length - 1]!.day;
+  err(`聚合: ${modelCount} 个模型, ${days.length} 天 (${firstDay} ~ ${lastDay}), harness=${harness}`);
 
   let exit = 0;
+
+  // ③ 出口: --json / --upload 共用的 ProfileV2 (生成处保证 ΣctxHist==nReq 不变量)
+  const profile: ProfileV2 = {
+    schema: "pricey-tokens-profile/v2",
+    harness,
+    days,
+    planUsed: null,
+    collectedAt: Date.now(),
+    toolVersion: VERSION,
+    trust: "anon", // 具服务端证明力的 github 档是 API B3 交付物, CLI 恒 anon
+  };
 
   if (opts.json) {
     out(JSON.stringify(profile, null, 2));
   }
 
   if (opts.upload) {
-    err("\n=== 将上传的完整内容 (ProfileV1, 仅模型串 + 四分类月速率 + 跨度, 无会话内容) ===\n");
+    err("\n=== 将上传的完整内容 (ProfileV2, 日粒度模型四分类计数 + 会话/请求计数 + ctx 直方图桶计数, 无会话内容) ===\n");
     err(previewText(profile));
     err("\n=== 预览结束 ===\n");
     if (!(await confirmUpload(opts.yes))) {
@@ -94,7 +136,7 @@ async function main(): Promise<number> {
         out(`${opts.api}${r.shareUrl}`);
       }
     } catch (e) {
-      err(`上传失败: ${e instanceof Error ? e.message : String(e)}`);
+      err(`上传失败: ${errMsg(e)}`);
       exit = 1;
     }
   }
@@ -102,7 +144,10 @@ async function main(): Promise<number> {
   // 默认出口 (无 --json 无 --upload): 分享 hash + 打开浏览器
   // (--json/--upload 模式下不重复打开 — 详见 README 各模式说明)
   if (!opts.json && !opts.upload) {
-    const hash = encodeShare(sharePayloadOf(agg.daily));
+    if (daily.length === 0) {
+      err("\n提示: 窗口内用量全部落在窗口首日 00:00 到窗口起点之间 — 分享链接将不携带任何记录。");
+    }
+    const hash = encodeShare(sharePayloadOf(daily));
     const url = buildShareUrl(opts.site, hash);
     if (hash.length > HASH_WARN_BYTES) {
       err(`\n警告: 分享 hash ${hash.length} 字节 (> ${HASH_WARN_BYTES}), URL 过长可能被浏览器/终端截断。`);

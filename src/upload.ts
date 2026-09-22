@@ -1,18 +1,18 @@
-// upload.ts — ProfileV1 上传 (POST {api}/api/v1/profiles, CONTRACT.md §1 冻结面)
+// upload.ts — ProfileV2 上传 (POST {api}/api/v1/profiles, CONTRACT.md 冻结面)
 // 职责边界: 预览 (原样打印完整 payload — HA 遥测规范: 用户须能看到将发送的一切) →
 // 确认 (--yes 或 TTY 交互; 非 TTY 且无 --yes 拒绝) → POST (X-Dedupe-Key 头) → 响应
 // 解析 {profileId, shareUrl}。shareUrl 是站内相对路径 (/share/N), 由调用方拼 API
 // base 成完整 URL。网络/非 2xx 响应抛错, 响应体 {"error": "<中文原因>"} 原样透传。
 import {createInterface} from "node:readline/promises";
 import {stdin, stderr as stderrStream} from "node:process";
-import type {ProfileV1} from "./types.js";
+import type {ProfileV2} from "./types.js";
 
 export interface UploadResult {
   profileId: number;
   shareUrl: string; // 站内相对路径 (如 /share/7)
 }
 
-export function previewText(profile: ProfileV1): string {
+export function previewText(profile: ProfileV2): string {
   return JSON.stringify(profile, null, 2);
 }
 
@@ -34,7 +34,7 @@ export async function confirmUpload(yes: boolean): Promise<boolean> {
   }
 }
 
-export async function uploadProfile(api: string, profile: ProfileV1, dedupeKey: string): Promise<UploadResult> {
+export async function uploadProfile(api: string, profile: ProfileV2, dedupeKey: string): Promise<UploadResult> {
   const res = await fetch(`${api}/api/v1/profiles`, {
     method: "POST",
     headers: {

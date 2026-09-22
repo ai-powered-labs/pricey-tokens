@@ -92,11 +92,11 @@ export const HELP_TEXT = `pricey-tokens — 本机 AI coding agent 用量收集�
 生成站点分享链接在浏览器打开 (换算你的用量值多少钱)。
 
 选项:
-  --json             输出 ProfileV1 JSON (月速率口径) 到 stdout
-  --upload           上传 ProfileV1 到社区档案 (上传前完整预览, 需确认)
+  --json             输出 ProfileV2 JSON (日粒度 + ctx 直方图) 到 stdout
+  --upload           上传 ProfileV2 到社区档案 (上传前完整预览, 需确认)
   --share            上传后打印分享 URL (须与 --upload 同用)
   --yes              跳过上传交互确认 (非交互环境的显式授权)
-  --days N|all       收集窗口天数 (默认 30; all = 全量)
+  --days N|all       出口窗口天数 (默认 30; all = 全量; 摄取恒为全历史增量)
   --harness LIST       只收集指定源, 逗号分隔: opencode,claude-code,codex
   --api URL          上传 API base (默认 https://pricey-tokens.lambda.lc)
   --site URL         分享站点 base (默认 https://pricey-tokens.lambda.lc/calc/,
@@ -104,5 +104,6 @@ export const HELP_TEXT = `pricey-tokens — 本机 AI coding agent 用量收集�
   --help             显示本帮助
   --version          显示版本
 
-隐私: 只聚合每模型的 token 四分类计数与时间戳, 不读取任何会话内容。
+隐私: 只聚合每模型每日的 token 四分类计数、会话/请求计数与 ctx 直方图桶计数,
+不读取任何会话内容; 用量账本只存本机 (~/.local/share/pricey-tokens/usage.db)。
 详见 README "采集什么与不采集什么"。`;

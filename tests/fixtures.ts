@@ -30,13 +30,6 @@ export async function writeLines(path: string, lines: unknown[]): Promise<string
   return path;
 }
 
-// 原始文本写入 (坏行/混排测试需要非 JSON 化的行内容)
-export async function writeRaw(path: string, text: string): Promise<string> {
-  await mkdir(join(path, ".."), {recursive: true});
-  await writeFile(path, text);
-  return path;
-}
-
 // --- claude-code 行构造 ---
 
 let claudeSeq = 0;
@@ -50,6 +43,8 @@ export interface ClaudeOpts {
   cacheWrite?: number;
   ts?: number;
   sidechain?: boolean;
+  sessionId?: string;
+  isApiError?: boolean; // isApiErrorMessage 行 (成功过滤的剔除面)
 }
 
 // assistant 记录; cache 字段缺省时不写键 (模拟第三方端点只回 input/output 的实测形态)
@@ -60,9 +55,10 @@ export function claudeAssistant(o: ClaudeOpts = {}): Record<string, unknown> {
   if (o.cacheRead !== undefined) usage.cache_read_input_tokens = o.cacheRead;
   return {
     type: "assistant",
+    isApiErrorMessage: o.isApiError ?? false ? true : undefined,
     isSidechain: o.sidechain ?? false,
     uuid: `u-${claudeSeq}`,
-    sessionId: "sess-1",
+    sessionId: o.sessionId ?? "sess-1",
     timestamp: iso(o.ts ?? T0),
     message: {id: o.msgId ?? `msg-${claudeSeq}`, type: "message", role: "assistant", model: o.model ?? "claude-sonnet-5", usage},
   };
@@ -118,8 +114,8 @@ interface FillCtx {
   exec(sql: string): unknown;
 }
 
-// session 表 (新 schema 形态) 建表+插行; timeColumn 双名 + dropColumns 模拟缺列 schema
-function fillSessionTable(db: FillCtx, rows: OcSessionRow[], timeColumn: string, dropColumns: string[]): void {
+// session 表 (新 schema 形态) 建表+插行
+function fillSessionTable(db: FillCtx, rows: OcSessionRow[]): void {
   const colSpec: Array<{name: string; decl: string; value: (r: OcSessionRow, i: number) => string}> = [
     {name: "id", decl: "text PRIMARY KEY", value: (_r, i) => `'s${i}'`},
     {name: "model", decl: "text", value: (r) => (r.model === null ? "NULL" : sqlStr(r.model))},
@@ -128,19 +124,18 @@ function fillSessionTable(db: FillCtx, rows: OcSessionRow[], timeColumn: string,
     {name: "tokens_reasoning", decl: "integer NOT NULL DEFAULT 0", value: (r) => String(r.reasoning)},
     {name: "tokens_cache_read", decl: "integer NOT NULL DEFAULT 0", value: (r) => String(r.cacheRead)},
     {name: "tokens_cache_write", decl: "integer NOT NULL DEFAULT 0", value: (r) => String(r.cacheWrite)},
-    {name: timeColumn, decl: "integer NOT NULL", value: (r) => String(r.time)},
+    {name: "time_updated", decl: "integer NOT NULL", value: (r) => String(r.time)},
   ];
-  const active = colSpec.filter((c) => !dropColumns.includes(c.name));
-  db.exec(`CREATE TABLE session (${active.map((c) => `${c.name} ${c.decl}`).join(", ")})`);
+  db.exec(`CREATE TABLE session (${colSpec.map((c) => `${c.name} ${c.decl}`).join(", ")})`);
   for (const [i, r] of rows.entries()) {
-    db.exec(`INSERT INTO session (${active.map((c) => c.name).join(", ")}) VALUES (${active.map((c) => c.value(r, i)).join(", ")})`);
+    db.exec(`INSERT INTO session (${colSpec.map((c) => c.name).join(", ")}) VALUES (${colSpec.map((c) => c.value(r, i)).join(", ")})`);
   }
 }
 
-export async function makeOpencodeDbFile(path: string, rows: OcSessionRow[], timeColumn = "time_updated", dropColumns: string[] = []): Promise<string> {
+export async function makeOpencodeDbFile(path: string, rows: OcSessionRow[]): Promise<string> {
   await mkdir(join(path, ".."), {recursive: true});
   const db = new Database(path);
-  fillSessionTable(db, rows, timeColumn, dropColumns);
+  fillSessionTable(db, rows);
   db.close();
   return Promise.resolve(path);
 }
@@ -155,6 +150,8 @@ export interface OcMsgOpts {
   reasoning?: number;
   cacheRead?: number;
   cacheWrite?: number;
+  error?: boolean; // data.error 键在场 (成功过滤的剔除面)
+  noTokens?: boolean; // 不写 tokens 键 (成功过滤的剔除面)
 }
 
 // message 行 data JSON (真实旧库 assistant 行字段结构, 合成数值);
@@ -166,39 +163,36 @@ export function ocMsg(o: OcMsgOpts = {}): string {
   const input = o.input ?? 0;
   const output = o.output ?? 0;
   const reasoning = o.reasoning ?? 0;
-  return JSON.stringify({
+  const d: Record<string, unknown> = {
     role: "assistant",
     time: {created: o.created ?? T0},
     modelID: o.modelID ?? "glm-5.3",
     providerID: o.providerID ?? "zai-coding-plan",
-    tokens: {total: input + output + reasoning, input, output, reasoning, cache: {read: o.cacheRead ?? 0, write: o.cacheWrite ?? 0}},
-  });
+  };
+  if (!o.noTokens) {
+    d.tokens = {total: input + output + reasoning, input, output, reasoning, cache: {read: o.cacheRead ?? 0, write: o.cacheWrite ?? 0}};
+  }
+  if (o.error) d.error = {type: "MessageOutputLengthError"}; // 实测: 错误行顶层 error 键 (伴随 tokens)
+  return JSON.stringify(d);
 }
 
-// 旧 schema 库: 旧形态 session 表 + message 表; messages 为 data 列原文
-// (字符串直插 — 允许塞坏 JSON / NULL 异常行)
-export async function makeOpencodeLegacyDbFile(path: string, messages: Array<string | null>, opts: {noSession?: boolean} = {}): Promise<string> {
-  await mkdir(join(path, ".."), {recursive: true});
-  const db = new Database(path);
-  if (!opts.noSession) {
-    db.exec("CREATE TABLE session (id text PRIMARY KEY, project_id text NOT NULL, title text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL)");
-  }
-  db.exec("CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text)");
-  for (const [i, m] of messages.entries()) {
-    db.exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('m${i}', 's0', 0, 0, ${m === null ? "NULL" : sqlStr(m)})`);
-  }
-  db.close();
-  return Promise.resolve(path);
+// message 表库 (账本摄取主形态): 行级 session 归属 + 可选新 schema session 汇总表
+// (对账权威源)。rowid 按插入序 1..N (水位线测试的可预测基准)。
+export interface OcMsgRow {
+  sess?: string; // 缺省 's0'
+  data?: string | null; // 缺省 ocMsg() 默认行; null = NULL data 列
 }
 
-// 新旧共存库 (新版 opencode 库形态): 验证 schema 探测优先 session 汇总路径
-export async function makeOpencodeDualDbFile(path: string, sessionRows: OcSessionRow[], messages: Array<string | null>): Promise<string> {
+export async function makeOpencodeMessageDb(path: string, rows: OcMsgRow[], sessionRows: OcSessionRow[] = []): Promise<string> {
   await mkdir(join(path, ".."), {recursive: true});
   const db = new Database(path);
-  fillSessionTable(db, sessionRows, "time_updated", []);
+  if (sessionRows.length > 0) {
+    fillSessionTable(db, sessionRows);
+  }
   db.exec("CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text)");
-  for (const [i, m] of messages.entries()) {
-    db.exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('m${i}', 's0', 0, 0, ${m === null ? "NULL" : sqlStr(m)})`);
+  for (const [i, r] of rows.entries()) {
+    const data = r.data === undefined ? ocMsg() : r.data;
+    db.exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('m${i}', '${r.sess ?? "s0"}', 0, 0, ${data === null ? "NULL" : sqlStr(data)})`);
   }
   db.close();
   return Promise.resolve(path);

@@ -1,8 +1,8 @@
-// ctx.test.ts — ctxEstimate 家族路由 + 12 桶直方图测试 (契约冻结面的回归锚)
+// ctx.test.ts — ctxEstimate 家族路由 + ctx/out 两张直方图测试 (契约冻结面的回归锚)
 // 覆盖: 家族路由 (claude/anthropic 前缀、openai 四标记、未知缺省)、公式分叉
-// (in+cr+cw vs in)、桶边界逐值 (左开右闭)、Σhist==nReq 的入桶守卫。
+// (in+cr+cw vs in)、ctx 12 桶与 out 9 桶边界逐值 (左开右闭)、Σhist==nReq 入桶守卫。
 import {describe, expect, it} from "bun:test";
-import {ctxBucketIndex, ctxEstimate, ctxFamily, CTX_BUCKET_COUNT, CTX_BUCKET_EDGES, emptyCtxHist} from "../src/ctx.js";
+import {ctxBucketIndex, ctxEstimate, ctxFamily, CTX_BUCKET_COUNT, CTX_BUCKET_EDGES, emptyCtxHist, outBucketIndex, OUT_BUCKET_COUNT, OUT_BUCKET_EDGES, emptyOutHist} from "../src/ctx.js";
 
 describe("ctxFamily 路由 (契约冻结)", () => {
   it("Anthropic 系: claude 前缀 / anthropic provider", () => {
@@ -84,5 +84,39 @@ describe("ctxBucketIndex 桶界 (左开右闭, 12 桶)", () => {
     const hist = emptyCtxHist();
     for (const c of ctxs) hist[ctxBucketIndex(c)]! += 1;
     expect(hist.reduce((a, b) => a + b, 0)).toBe(ctxs.length);
+  });
+});
+
+describe("outBucketIndex 桶界 (左开右闭, 9 桶)", () => {
+  it("桶边界表 = 契约冻结值 (1k..128k 对数档)", () => {
+    expect(OUT_BUCKET_EDGES).toEqual([1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]);
+    expect(OUT_BUCKET_COUNT).toBe(9);
+  });
+
+  it("边界值属左桶: 0→0 ([0,1k] 合并), 1024→0, 1025→1, 末桶无上界", () => {
+    expect(outBucketIndex(0)).toBe(0); // 纯输入请求计桶 0 (ΣoutHist==nReq 要求)
+    expect(outBucketIndex(1)).toBe(0);
+    expect(outBucketIndex(1024)).toBe(0);
+    expect(outBucketIndex(1025)).toBe(1);
+    expect(outBucketIndex(2048)).toBe(1);
+    expect(outBucketIndex(65536)).toBe(6);
+    expect(outBucketIndex(131072)).toBe(7);
+    expect(outBucketIndex(131073)).toBe(8); // (128k,∞)
+    expect(outBucketIndex(1e9)).toBe(8);
+  });
+
+  it("emptyOutHist: 9 维零向量且独立副本", () => {
+    const a = emptyOutHist();
+    const b = emptyOutHist();
+    expect(a).toEqual(Array(9).fill(0));
+    a[0] = 1;
+    expect(b[0]).toBe(0);
+  });
+
+  it("逐请求入桶后 Σhist == n_req", () => {
+    const outs = [0, 500, 1024, 9000, 90000, 500000];
+    const hist = emptyOutHist();
+    for (const o of outs) hist[outBucketIndex(o)]! += 1;
+    expect(hist.reduce((a, b) => a + b, 0)).toBe(outs.length);
   });
 });

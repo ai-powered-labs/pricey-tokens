@@ -17,14 +17,14 @@
 // 成功过滤剔除的错误行会计入源汇总, 该类差异属预期告警面)。claude/codex 无会话级
 // 权威源, 跳过。
 import {stat} from "node:fs/promises";
-import type {HarnessId, RequestRow} from "./types.js";
+import type {HarnessId, RequestRow, TurnRow} from "./types.js";
 import {ALL_HARNESSES} from "./types.js";
 import {errMsg} from "./guards.js";
 import {findClaudeFiles, findCodexFiles, findOpencodeDbs, notFoundDetail} from "./discover.js";
 import {collectClaudeRequests} from "./collectors/claude.js";
 import {collectCodexRequests} from "./collectors/codex.js";
 import {collectOpencodeRequests, opencodeSessionSummaries} from "./collectors/opencode.js";
-import type {Ledger} from "./ledger.js";
+import type {Ledger, SessRef} from "./ledger.js";
 
 export interface IngestStatus {
   harness: HarnessId;
@@ -46,12 +46,14 @@ export interface IngestOptions {
   dataRoot: string; // opencode 源与账本共用的 XDG 数据根 (已解析 — 与 Ledger.open 同源)
 }
 
-// 批次落账: 归并 + 受影响日重算 (水位线推进由调用方在批后执行 — 顺序即崩溃一致性)。
-// 受影响日由账本返回 (本批行 ts 日 ∪ 被覆盖行旧 ts 日 — upsert 换日覆盖时旧日
-// 必须重算)
-function commitBatch(ledger: Ledger, rows: readonly RequestRow[]): number {
-  const {changed, days} = ledger.insertRequests(rows);
-  ledger.recomputeDays(days);
+// 批次落账: 归并 (请求 + 轮次) → 会话重算 → 受影响日重算 (水位线推进由调用方在
+// 批后执行 — 顺序即崩溃一致性)。受影响日 = 请求行 ts 日 ∪ 被覆盖行旧 ts 日 ∪ 会话
+// 归因日迁移 (last_ts 换日时旧归因日必须重算, 否则 maxCtxHist/nTurns 残留双计)。
+function commitBatch(ledger: Ledger, rows: readonly RequestRow[], turns: readonly TurnRow[]): number {
+  const {changed, days, sessions} = ledger.insertRequests(rows);
+  const turnSessions = ledger.insertTurns(turns);
+  const sessDays = ledger.recomputeSessions([...sessions, ...turnSessions]);
+  ledger.recomputeDays([...days, ...sessDays]);
   return changed;
 }
 
@@ -67,8 +69,8 @@ async function ingestOpencode(ledger: Ledger, opts: IngestOptions, report: Inges
     const wlKey = `wl:oc:${dbPath}`;
     const since = Number(ledger.getMeta(wlKey) ?? 0);
     try {
-      const {rows, maxRowid, reset} = await collectOpencodeRequests(dbPath, since);
-      const changed = commitBatch(ledger, rows);
+      const {rows, turns, maxRowid, reset} = await collectOpencodeRequests(dbPath, since);
+      const changed = commitBatch(ledger, rows, turns);
       report.inserted += changed;
       // 水位线推进不依赖收割行数 (新增行全被成功过滤的窗口也是合法终态 — 不推进
       // 会每跑重扫); since == maxRowid 时免写
@@ -126,7 +128,7 @@ async function reconcileOpencode(ledger: Ledger, dbPath: string, changedSessions
 async function ingestJsonl(
   harness: "claude-code" | "codex",
   files: string[],
-  collect: (path: string) => Promise<{rows: RequestRow[]; skipped: string | null}>,
+  collect: (path: string) => Promise<{rows: RequestRow[]; turns: TurnRow[]; skipped: string | null}>,
   ledger: Ledger,
   report: IngestReport,
 ): Promise<void> {
@@ -144,9 +146,9 @@ async function ingestJsonl(
     }
     if (ledger.getMeta(wlKey) === fingerprint) continue; // 未变化 → 跳过 (增量秒级的核心)
     try {
-      const {rows, skipped} = await collect(path);
+      const {rows, turns, skipped} = await collect(path);
       if (skipped !== null) report.skipped.push(skipped);
-      inserted += commitBatch(ledger, rows);
+      inserted += commitBatch(ledger, rows, turns);
       ledger.setMeta(wlKey, fingerprint);
       rescanned += 1;
     } catch (e) {

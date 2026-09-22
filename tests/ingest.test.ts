@@ -9,7 +9,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {ingestAll} from "../src/ingest.js";
 import {Ledger} from "../src/ledger.js";
-import {T0, DAY, claudeAssistant, makeOpencodeMessageDb, ocMsg, writeLines} from "./fixtures.js";
+import {T0, DAY, claudeAssistant, claudeUser, makeOpencodeMessageDb, ocMsg, writeLines} from "./fixtures.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -167,6 +167,35 @@ describe("摄取幂等与水位线", () => {
     ]);
     const r = await ingest(home, dataHome);
     expect(r.total).toBe(1);
+  });
+
+  it("v3 端到端: 轮次与工具数经编排入账 → session_stats/day_stats 物化 (opencode + claude)", async () => {
+    const {home, dataHome} = await freshEnv();
+    await makeOpencodeMessageDb(join(dataHome, "opencode", "opencode.db"), [
+      {sess: "s0", data: ocMsg({role: "user", created: T0})},
+      {sess: "s0", data: ocMsg({input: 10, created: T0}), tools: 2},
+    ]);
+    await writeLines(join(home, ".claude", "projects", "p", "sess-x.jsonl"), [
+      claudeUser({sessionId: "sess-x", uuid: "u1"}),
+      claudeAssistant({msgId: "m1", input: 100, output: 5, ts: T0, sessionId: "sess-x", toolUses: 1}),
+    ]);
+    await ingest(home, dataHome);
+    const ledger = await Ledger.open(dataHome);
+    try {
+      const days = ledger.profileDays(null, []);
+      // opencode 会话: 2 工具 1 轮; claude 会话: 1 工具 1 轮 — 各归各模型行
+      const oc = days[0]!.models.find((m) => m.id === "zai-coding-plan/glm-5.3")!;
+      expect(oc.nReq).toBe(1);
+      // (nTools/nTurns 发射面字段属下一提交; 此处经 day_stats 直读校验物化)
+      const {createSqlite} = await import("../src/sqlite.js");
+      const db = await createSqlite(join(dataHome, "pricey-tokens", "usage.db"));
+      const d = db.prepare("SELECT model, n_tools, n_turns FROM day_stats").all();
+      db.close();
+      expect(d.find((r) => r.model === "zai-coding-plan/glm-5.3")).toMatchObject({n_tools: 2, n_turns: 1});
+      expect(d.find((r) => r.model === "claude-sonnet-5")).toMatchObject({n_tools: 1, n_turns: 1});
+    } finally {
+      ledger.close();
+    }
   });
 
   it("对账: 账本与源汇总不一致 → 告警不 fail; 一致 → 无告警", async () => {

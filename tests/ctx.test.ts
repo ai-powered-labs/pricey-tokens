@@ -1,8 +1,9 @@
-// ctx.test.ts — ctxEstimate 家族路由 + ctx/out 两张直方图测试 (契约冻结面的回归锚)
+// ctx.test.ts — ctxEstimate 家族路由 + ctx/out 直方图 + DB 列名测试 (契约冻结面的回归锚)
 // 覆盖: 家族路由 (claude/anthropic 前缀、openai 四标记、未知缺省)、公式分叉
-// (in+cr+cw vs in)、ctx 12 桶与 out 9 桶边界逐值 (左开右闭)、Σhist==nReq 入桶守卫。
+// (in+cr+cw vs in)、ctx 9 桶与 out 4 桶边界逐值 (左开右闭, 32k 以下合桶)、
+// Σhist==nReq 入桶守卫、独立列名 SSOT (gt<下界> 命名)。
 import {describe, expect, it} from "bun:test";
-import {ctxBucketIndex, ctxEstimate, ctxFamily, CTX_BUCKET_COUNT, CTX_BUCKET_EDGES, emptyCtxHist, outBucketIndex, OUT_BUCKET_COUNT, OUT_BUCKET_EDGES, emptyOutHist} from "../src/ctx.js";
+import {ctxBucketIndex, ctxEstimate, ctxFamily, CTX_BUCKET_COUNT, CTX_BUCKET_EDGES, CTX_HIST_COLS, emptyCtxHist, outBucketIndex, OUT_BUCKET_COUNT, OUT_BUCKET_EDGES, OUT_HIST_COLS, emptyOutHist, MCTX_HIST_COLS} from "../src/ctx.js";
 
 describe("ctxFamily 路由 (契约冻结)", () => {
   it("Anthropic 系: claude 前缀 / anthropic provider", () => {
@@ -52,71 +53,84 @@ describe("ctxEstimate 公式 (契约冻结)", () => {
   });
 });
 
-describe("ctxBucketIndex 桶界 (左开右闭, 12 桶)", () => {
+describe("ctxBucketIndex 桶界 (左开右闭, 9 桶, 32k 以下合桶)", () => {
   it("桶边界表 = 契约冻结值", () => {
-    expect(CTX_BUCKET_EDGES).toEqual([4096, 8192, 16384, 32768, 65536, 131072, 204800, 262144, 524288, 1048576, 2097152]);
-    expect(CTX_BUCKET_COUNT).toBe(12);
+    expect(CTX_BUCKET_EDGES).toEqual([32768, 65536, 131072, 204800, 262144, 524288, 1048576, 2097152]);
+    expect(CTX_BUCKET_COUNT).toBe(9);
   });
 
-  it("边界值属下侧桶: (0,4k]→0, 4097→1, 桶界值即该桶上界", () => {
+  it("边界值属下侧桶: (0,32k]→0, 32769→1, 桶界值即该桶上界", () => {
     expect(ctxBucketIndex(1)).toBe(0);
-    expect(ctxBucketIndex(4096)).toBe(0);
-    expect(ctxBucketIndex(4097)).toBe(1);
-    expect(ctxBucketIndex(8192)).toBe(1);
-    expect(ctxBucketIndex(131072)).toBe(5);
-    expect(ctxBucketIndex(204800)).toBe(6); // 128k~200k 桶的上界
-    expect(ctxBucketIndex(204801)).toBe(7); // 200k~256k (套餐语境档)
-    expect(ctxBucketIndex(2097152)).toBe(10); // (1M,2M]
-    expect(ctxBucketIndex(2097153)).toBe(11); // (2M,∞)
-    expect(ctxBucketIndex(1e12)).toBe(11);
+    expect(ctxBucketIndex(32768)).toBe(0);
+    expect(ctxBucketIndex(32769)).toBe(1);
+    expect(ctxBucketIndex(65536)).toBe(1);
+    expect(ctxBucketIndex(131072)).toBe(2);
+    expect(ctxBucketIndex(204800)).toBe(3); // 128k~200k 桶的上界
+    expect(ctxBucketIndex(204801)).toBe(4); // 200k~256k (套餐语境档)
+    expect(ctxBucketIndex(2097152)).toBe(7); // (1M,2M]
+    expect(ctxBucketIndex(2097153)).toBe(8); // (2M,∞)
+    expect(ctxBucketIndex(1e12)).toBe(8);
   });
 
-  it("emptyCtxHist: 12 维零向量且独立副本", () => {
+  it("emptyCtxHist: 9 维零向量且独立副本", () => {
     const a = emptyCtxHist();
     const b = emptyCtxHist();
-    expect(a).toEqual(Array(12).fill(0));
+    expect(a).toEqual(Array(9).fill(0));
     a[0] = 1;
     expect(b[0]).toBe(0); // 不共享引用
   });
 
   it("逐请求入桶后 Σhist == n_req (不变量的构造侧来源)", () => {
-    const ctxs = [100, 4096, 4097, 100000, 300000, 3000000];
+    const ctxs = [100, 32768, 32769, 100000, 300000, 3000000];
     const hist = emptyCtxHist();
     for (const c of ctxs) hist[ctxBucketIndex(c)]! += 1;
     expect(hist.reduce((a, b) => a + b, 0)).toBe(ctxs.length);
   });
 });
 
-describe("outBucketIndex 桶界 (左开右闭, 9 桶)", () => {
-  it("桶边界表 = 契约冻结值 (1k..128k 对数档)", () => {
-    expect(OUT_BUCKET_EDGES).toEqual([1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]);
-    expect(OUT_BUCKET_COUNT).toBe(9);
+describe("outBucketIndex 桶界 (左开右闭, 4 桶, 32k 以下合桶)", () => {
+  it("桶边界表 = 契约冻结值", () => {
+    expect(OUT_BUCKET_EDGES).toEqual([32768, 65536, 131072]);
+    expect(OUT_BUCKET_COUNT).toBe(4);
   });
 
-  it("边界值属左桶: 0→0 ([0,1k] 合并), 1024→0, 1025→1, 末桶无上界", () => {
+  it("边界值属左桶: 0→0, 32768→0, 32769→1, 末桶无上界", () => {
     expect(outBucketIndex(0)).toBe(0); // 纯输入请求计桶 0 (ΣoutHist==nReq 要求)
     expect(outBucketIndex(1)).toBe(0);
-    expect(outBucketIndex(1024)).toBe(0);
-    expect(outBucketIndex(1025)).toBe(1);
-    expect(outBucketIndex(2048)).toBe(1);
-    expect(outBucketIndex(65536)).toBe(6);
-    expect(outBucketIndex(131072)).toBe(7);
-    expect(outBucketIndex(131073)).toBe(8); // (128k,∞)
-    expect(outBucketIndex(1e9)).toBe(8);
+    expect(outBucketIndex(32768)).toBe(0);
+    expect(outBucketIndex(32769)).toBe(1);
+    expect(outBucketIndex(65536)).toBe(1);
+    expect(outBucketIndex(131072)).toBe(2);
+    expect(outBucketIndex(131073)).toBe(3); // (128k,∞)
+    expect(outBucketIndex(1e9)).toBe(3);
   });
 
-  it("emptyOutHist: 9 维零向量且独立副本", () => {
+  it("emptyOutHist: 4 维零向量且独立副本", () => {
     const a = emptyOutHist();
     const b = emptyOutHist();
-    expect(a).toEqual(Array(9).fill(0));
+    expect(a).toEqual(Array(4).fill(0));
     a[0] = 1;
     expect(b[0]).toBe(0);
   });
 
   it("逐请求入桶后 Σhist == n_req", () => {
-    const outs = [0, 500, 1024, 9000, 90000, 500000];
+    const outs = [0, 500, 32768, 9000, 90000, 500000];
     const hist = emptyOutHist();
     for (const o of outs) hist[outBucketIndex(o)]! += 1;
     expect(hist.reduce((a, b) => a + b, 0)).toBe(outs.length);
+  });
+});
+
+describe("DB 独立列名 (gt<下界> 命名, 分析面无复合字段)", () => {
+  it("ctx/mctx 列名 = 9 桶下界 (0,32k,64k,128k,200k,256k,512k,1m,2m)", () => {
+    expect(CTX_HIST_COLS).toEqual(["ctx_gt0", "ctx_gt32k", "ctx_gt64k", "ctx_gt128k", "ctx_gt200k", "ctx_gt256k", "ctx_gt512k", "ctx_gt1m", "ctx_gt2m"]);
+    expect(MCTX_HIST_COLS).toEqual(["mctx_gt0", "mctx_gt32k", "mctx_gt64k", "mctx_gt128k", "mctx_gt200k", "mctx_gt256k", "mctx_gt512k", "mctx_gt1m", "mctx_gt2m"]);
+  });
+
+  it("out 列名 = 4 桶下界; 列数与桶数一致", () => {
+    expect(OUT_HIST_COLS).toEqual(["out_gt0", "out_gt32k", "out_gt64k", "out_gt128k"]);
+    expect(CTX_HIST_COLS.length).toBe(CTX_BUCKET_COUNT);
+    expect(OUT_HIST_COLS.length).toBe(OUT_BUCKET_COUNT);
+    expect(MCTX_HIST_COLS.length).toBe(CTX_BUCKET_COUNT);
   });
 });

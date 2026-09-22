@@ -1,6 +1,6 @@
-// ctx.ts — ctxEstimate 上下文估算公式 + 12 桶直方图 + outHist 9 桶直方图 (契约冻结, 2026-09-22)
-// 职责边界: 单一模块承载 ctxEstimate 的 provider 家族路由与两张桶边界表 — 这是跨端
-// 可比性的前提 (设计文档 §5 契约冻结三件): 全客户端必须同公式入桶, 改公式或改桶
+// ctx.ts — ctxEstimate 上下文估算公式 + ctx/maxCtx 9 桶直方图 + outHist 4 桶直方图 (契约冻结, 2026-09-22)
+// 职责边界: 单一模块承载 ctxEstimate 的 provider 家族路由与两张桶边界表 + DB 独立列名 —
+// 这是跨端可比性的前提 (设计文档 §5 契约冻结三件): 全客户端必须同公式入桶, 改公式或改桶
 // = 契约版本 bump, 老数据按旧桶解释。严禁在其他模块复现任何一者 (含 SQL 侧)。
 //
 // 公式 (冻结):
@@ -9,42 +9,70 @@
 //   OpenAI 系 (provider 段 = "openai", 或 id 段 openai*/gpt*/o*/codex* 前缀):
 //     ctx = in             (cached ⊆ prompt, 计入 prompt 已覆盖)
 //   未知缺省: ctx = in + cr + cw (宁可高估不漏计; 与 Anthropic 系同式)
-// 桶边界 (对数档+套餐语境档, 12 桶, 左开右闭):
-//   (0,4k] (4k,8k] (8k,16k] (16k,32k] (32k,64k] (64k,128k]
-//   (128k,200k] (200k,256k] (256k,512k] (512k,1M] (1M,2M] (2M,∞)
+// 桶边界 (2026-09-22 用户裁决: 32k 以下不分桶 — 小请求无决策差异, 决策面全在
+// 128k+ 帽位; 9 桶, 左开右闭):
+//   (0,32k] (32k,64k] (64k,128k] (128k,200k] (200k,256k] (256k,512k] (512k,1M] (1M,2M] (2M,∞)
 //
-// outHist (输出规模分布, 冻结): 单请求 outputTokens 落桶, 物理量无公式路由
-// (家族路由是 ctx 特有的计费语义, out 无此分叉)。9 桶, 左开右闭:
-//   (0,1k] (1k,2k] (2k,4k] (4k,8k] (8k,16k] (16k,32k] (32k,64k] (64k,128k] (128k,∞)
-// 注: out=0 (纯输入请求) 计桶 0 — 不变量 ΣoutHist==nReq 要求每请求恰落一桶,
-// [0,1k] 与首桶合并是结构性选择, 与 ctxHist 同款。
+// outHist (输出规模分布, 冻结; 同裁决 32k 合桶, 4 桶): 单请求 outputTokens 落桶,
+// 物理量无公式路由 (家族路由是 ctx 特有的计费语义, out 无此分叉)。左开右闭:
+//   (0,32k] (32k,64k] (64k,128k] (128k,∞)
+// 注: out=0 (纯输入请求) 计桶 0 — 不变量 ΣoutHist==nReq 要求每请求恰落一桶。
+//
+// DB 列名 (分析面独立列, 用户裁决 "db 无复合字段"): 每桶一列, 名 = gt<下界>
+// (桶 i 的下界 = i==0 ? 0 : edges[i-1]; gt200k = (200k,256k] 桶)。尾桶下界即
+// 末边值 (ctx_gt2m = (2M,∞))。count(>X) = Σ{列: 下界 ≥ X} 列 — 列名即阈值,
+// 尾和可读。JSON 契约 (传输面) 仍是数组, DB (分析面) 拆列 — 两面各按其职。
 
 export type CtxFamily = "anthropic" | "openai" | "unknown";
 
 // 桶上界表 (末桶无上界); 长度 = 桶数 - 1
 export const CTX_BUCKET_EDGES: readonly number[] = [
-  4096, 8192, 16384, 32768, 65536, 131072, 204800, 262144, 524288, 1048576, 2097152,
+  32768, 65536, 131072, 204800, 262144, 524288, 1048576, 2097152,
 ] as const;
 
-export const CTX_BUCKET_COUNT = CTX_BUCKET_EDGES.length + 1; // 12
+export const CTX_BUCKET_COUNT = CTX_BUCKET_EDGES.length + 1; // 9
 
 // 零向量直方图 (独立副本, 勿共享引用)
 export function emptyCtxHist(): number[] {
   return Array.from({length: CTX_BUCKET_COUNT}, () => 0);
 }
 
-// ===== outHist 输出规模直方图 (9 桶) =====
+// ===== outHist 输出规模直方图 (4 桶) =====
 
 // 桶上界表 (末桶无上界); 长度 = 桶数 - 1
 export const OUT_BUCKET_EDGES: readonly number[] = [
-  1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
+  32768, 65536, 131072,
 ] as const;
 
-export const OUT_BUCKET_COUNT = OUT_BUCKET_EDGES.length + 1; // 9
+export const OUT_BUCKET_COUNT = OUT_BUCKET_EDGES.length + 1; // 4
 
 export function emptyOutHist(): number[] {
   return Array.from({length: OUT_BUCKET_COUNT}, () => 0);
 }
+
+// ===== DB 独立列名 (day_stats 分析面; 与桶表同源生成, 勿手抄) =====
+
+// 数值 → 列名后缀 (32k/200k/1m/2m 风格; 0 → "0")
+function boundSuffix(v: number): string {
+  if (v === 0) return "0";
+  if (v % 1048576 === 0) return `${v / 1048576}m`;
+  if (v % 1024 === 0) return `${v / 1024}k`;
+  return String(v);
+}
+
+// 桶 i 的下界 (i==0 → 0; 其余 → edges[i-1])
+function lowerBounds(edges: readonly number[]): number[] {
+  return Array.from({length: edges.length + 1}, (_, i) => (i === 0 ? 0 : edges[i - 1]!));
+}
+
+// ctx/maxCtx 直方图的 9 个列名 (前缀拼接): ctx_gt0, ctx_gt32k, ..., ctx_gt2m
+export const CTX_HIST_COLS: readonly string[] = lowerBounds(CTX_BUCKET_EDGES).map((b) => `ctx_gt${boundSuffix(b)}`);
+
+// outHist 的 4 个列名: out_gt0, out_gt32k, out_gt64k, out_gt128k
+export const OUT_HIST_COLS: readonly string[] = lowerBounds(OUT_BUCKET_EDGES).map((b) => `out_gt${boundSuffix(b)}`);
+
+// maxCtxHist 的 9 个列名: mctx_gt0, ..., mctx_gt2m
+export const MCTX_HIST_COLS: readonly string[] = lowerBounds(CTX_BUCKET_EDGES).map((b) => `mctx_gt${boundSuffix(b)}`);
 
 // model 串 → provider 家族。"providerID/modelId" 拼接串取首 "/" 拆段; 裸串整体
 // 视为 id 段。anthropic 判定在前 (claude* 永不落入 openai 的 o* 前缀误伤)。

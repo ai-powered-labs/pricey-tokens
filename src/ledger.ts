@@ -14,9 +14,11 @@
 //     (turn_events 计数 join), n_tools (requests Σ), 四分类 Σ, max_ctx (ctxEstimate
 //     家族路由, TS 侧求值 — ctx.ts 是公式唯一来源, 严禁 SQL 侧复现)。恒等于 requests
 //     ∪ turn_events 的派生, 受影响会话重算自愈。
-//   - day_stats 表: day×model 物化 (n_req + n_tools + 三张直方图: ctx_hist 12 桶 /
-//     out_hist 9 桶 / max_ctx_hist 12 桶 + 会话归因 n_turns), 增量摄取后只重算受影响
-//     日 (含会话归因日迁移), 直接从 requests ∪ session_stats 重聚合, 精确归属。
+//   - day_stats 表: day×model 物化 (n_req + n_tools + 三张直方图的**独立整数列**:
+//     ctx_gt* 9 桶 / out_gt* 4 桶 / mctx_gt* 9 桶 + 会话归因 n_turns — 分析面无复合
+//     字段, 用户裁决 2026-09-22; 列名 SSOT 在 ctx.ts, 与桶表同源生成), 增量摄取后
+//     只重算受影响日 (含会话归因日迁移), 直接从 requests ∪ session_stats 重聚合,
+//     精确归属。
 //   - meta 表: schema_version + 各源摄取水位线 (键契约见 ingest.ts)。
 // 会话归因规则 (设计 §5): 会话贡献 (max_ctx_hist + n_turns) 记 (last_ts 日, 主模型),
 // 一会话一增量无跨模型双计; n_tools/out_hist/ctx_hist 仍是 request 各归各 (日,模型)。
@@ -24,9 +26,10 @@
 // 聚合 ≤ ΣnSess (会话末日必有请求在当日); **逐行** ΣmaxCtxHist≤nSess 在 "跨日压缩 +
 // 换模型续会话" 边缘形态下不成立 (主模型当日无请求但会话末日在此日), 已知接受 —
 // 直方图会话原子性 (一会话恰一增量) 不受影响。
-// v2→v3 迁移: ALTER 加列 + 全量重算 session_stats/day_stats (从 requests 现算),
-// 单事务原子; 存量行 n_tools/n_turns 无源数据 (水位线已过, 源不重扫) 恒 0, 新数据
-// 起全字段 — max_ctx/max_ctx_hist 存量同样可从 requests 现算故真实回填。
+// v2/v3→v4 迁移: (v2 加 requests.n_tools 列) + DROP day_stats 重建宽列形态 +
+// 全量重算 session_stats/day_stats (从 requests 现算), 单事务原子; 存量行
+// n_tools/n_turns 无源数据 (水位线已过, 源不重扫) 恒 0, 新数据起全字段 —
+// max_ctx/mctx 列存量同样可从 requests 现算故真实回填。
 // 读取面: 分享日记录 (ts 精确窗口) / ProfileV2 日行 (day 对齐窗口) / 对账用
 // per-session rollup — 全部窗口路径共用同一聚合核心 (分享口径 == day_stats 口径
 // 由构造保证)。ctx 公式与桶表唯一来源是 ctx.ts (契约冻结, 本模块不复现)。
@@ -37,10 +40,10 @@ import {mkdir} from "node:fs/promises";
 import {join} from "node:path";
 import type {HarnessId, ProfileDayV2, ProfileModelV2, RequestRow, TurnRow, UsageRecord} from "./types.js";
 import {createSqlite, type SqliteRwDb, type SqliteStmt} from "./sqlite.js";
-import {CTX_BUCKET_COUNT, ctxBucketIndex, ctxEstimate, emptyCtxHist, emptyOutHist, OUT_BUCKET_COUNT, outBucketIndex} from "./ctx.js";
+import {CTX_BUCKET_COUNT, ctxBucketIndex, ctxEstimate, CTX_HIST_COLS, emptyCtxHist, emptyOutHist, MCTX_HIST_COLS, OUT_BUCKET_COUNT, outBucketIndex, OUT_HIST_COLS} from "./ctx.js";
 import {dayEndTs, dayStartTs, localDayKey} from "./day.js";
 
-export const SCHEMA_VERSION = "3";
+export const SCHEMA_VERSION = "4";
 
 // 受影响会话引用 (重算编排的单位; Map key 序列化用 `${harness} ${sessKey}`)
 export interface SessRef {
@@ -66,6 +69,9 @@ const SQL_CHUNK = 500;
 function ledgerPath(dataHome: string): string {
   return join(dataHome, "pricey-tokens", "usage.db");
 }
+
+// day_stats 直方图独立列 (SSOT 生成, 勿手抄): ctx_gt*(9) + out_gt*(4) + mctx_gt*(9)
+const HIST_COL_DEFS = [...CTX_HIST_COLS, ...OUT_HIST_COLS, ...MCTX_HIST_COLS].map((c) => `${c} INTEGER NOT NULL DEFAULT 0`).join(",\n  ");
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS requests (
@@ -113,11 +119,8 @@ CREATE TABLE IF NOT EXISTS day_stats (
   in_t INTEGER NOT NULL, out_t INTEGER NOT NULL,
   cr_t INTEGER NOT NULL, cw_t INTEGER NOT NULL,
   n_sess INTEGER NOT NULL, n_req INTEGER NOT NULL,
-  ctx_hist TEXT NOT NULL,
-  out_hist TEXT NOT NULL,
-  n_turns INTEGER NOT NULL,
-  n_tools INTEGER NOT NULL,
-  max_ctx_hist TEXT NOT NULL,
+  n_turns INTEGER NOT NULL, n_tools INTEGER NOT NULL,
+  ${HIST_COL_DEFS},
   PRIMARY KEY (day, model)
 );
 `;
@@ -159,14 +162,14 @@ function accFor(byDay: Map<string, Map<string, DayModelAcc>>, day: string, model
   return acc;
 }
 
-// 直方图 JSON 落盘解析 (发射守卫): 形状 + 可选 Σ 校验 — day_stats 被外部改写的
-// 静默损坏在此拦截 (构造侧天然满足不变量)
-function parseHist(text: string, expectLen: number, nReq: number | null, what: string, where: string): number[] {
-  const hist = JSON.parse(text) as unknown;
-  const ok = Array.isArray(hist) && hist.length === expectLen && hist.every((c) => typeof c === "number" && c >= 0) &&
-    (nReq === null || hist.reduce((a, b) => a + (b as number), 0) === nReq);
-  if (!ok) throw new Error(`day_stats ${what} 损坏 (${where}): ${text}${nReq === null ? "" : ` (nReq=${nReq})`}`);
-  return hist as number[];
+// 独立列 → 直方图数组重组 (发射守卫): 形状天然满足 (列 SSOT 生成), 可选 Σ 校验 —
+// day_stats 被外部改写的静默损坏在此拦截 (构造侧天然满足不变量)
+function histFromCols(row: Record<string, unknown>, cols: readonly string[], nReq: number | null, what: string, where: string): number[] {
+  const hist = cols.map((c) => row[c] as number);
+  if (hist.some((c) => typeof c !== "number" || c < 0) || (nReq !== null && hist.reduce((a, b) => a + b, 0) !== nReq)) {
+    throw new Error(`day_stats ${what} 损坏 (${where}): [${hist.join(",")}]${nReq === null ? "" : ` (nReq=${nReq})`}`);
+  }
+  return hist;
 }
 
 // requests 原始行 (SELECT 输出, 列值未定型) → (day, model) 聚合; ctx/out 入桶唯一
@@ -278,27 +281,26 @@ export class Ledger {
       return ledger;
     }
     if (version === SCHEMA_VERSION) return new Ledger(db);
-    if (version === "2") return Ledger.migrateV2ToV3(db);
+    if (version === "2" || version === "3") return Ledger.migrateToV4(db, version);
     db.close();
     throw new Error(`账本 schema 版本不符 (${version} ≠ ${SCHEMA_VERSION}): 删除 ${file} 后重跑可全量重建`);
   }
 
-  // v2 → v3 迁移: ALTER 加列 + 全量重算 (单事务原子 — 崩溃回滚保 v2 可重试)。
-  // 存量行 n_tools/n_turns 无源 (水位线已过源不重扫, 见头注) 恒 0; max_ctx/
-  // max_ctx_hist/ctx_hist/out_hist 从 requests 现算真实回填。
-  private static migrateV2ToV3(db: SqliteRwDb): Ledger {
+  // v2/v3 → v4 迁移: (v2 补 requests.n_tools) + DROP day_stats 重建宽列形态 +
+  // 全量重算 (单事务原子 — 崩溃回滚保旧版可重试)。存量行 n_tools/n_turns 无源
+  // (水位线已过源不重扫, 见头注) 恒 0; 直方图/max_ctx 从 requests 现算真实回填。
+  private static migrateToV4(db: SqliteRwDb, from: string): Ledger {
     db.exec("BEGIN");
     try {
-      db.exec("ALTER TABLE requests ADD COLUMN n_tools INTEGER NOT NULL DEFAULT 0");
-      db.exec("ALTER TABLE day_stats ADD COLUMN out_hist TEXT NOT NULL DEFAULT '[]'");
-      db.exec("ALTER TABLE day_stats ADD COLUMN n_turns INTEGER NOT NULL DEFAULT 0");
-      db.exec("ALTER TABLE day_stats ADD COLUMN n_tools INTEGER NOT NULL DEFAULT 0");
-      db.exec("ALTER TABLE day_stats ADD COLUMN max_ctx_hist TEXT NOT NULL DEFAULT '[]'");
+      if (from === "2") db.exec("ALTER TABLE requests ADD COLUMN n_tools INTEGER NOT NULL DEFAULT 0");
+      const days = new Set<string>(db.prepare("SELECT DISTINCT day FROM day_stats").all().map((r) => String(r.day)));
+      db.exec("DROP TABLE day_stats");
+      db.exec(DDL);
       const ledger = new Ledger(db);
       const pairs = db.prepare("SELECT DISTINCT harness, sess_key FROM requests").all()
         .map((r) => ({harness: r.harness as HarnessId, sessKey: String(r.sess_key)}));
-      ledger.recomputeSessions(pairs);
-      const days = db.prepare("SELECT DISTINCT day FROM day_stats").all().map((r) => String(r.day));
+      for (const d of ledger.recomputeSessions(pairs)) days.add(d);
+      for (const r of db.prepare("SELECT ts FROM requests").all()) days.add(localDayKey(r.ts as number));
       ledger.recomputeDays(days);
       ledger.setMeta("schema_version", SCHEMA_VERSION);
       db.exec("COMMIT");
@@ -481,9 +483,12 @@ export class Ledger {
       }
     }
     const delDay = this.db.prepare("DELETE FROM day_stats WHERE day = ?");
+    // 列清单 SSOT: 标量列 + 直方图独立列 (ctx.ts 生成); VALUES 展开同序
+    const scalars = "day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, n_turns, n_tools";
+    const histCols = [...CTX_HIST_COLS, ...OUT_HIST_COLS, ...MCTX_HIST_COLS];
     const insDay = this.db.prepare(`INSERT INTO day_stats
-      (day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist, out_hist, n_turns, n_tools, max_ctx_hist)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      (${scalars}, ${histCols.join(", ")})
+      VALUES (${placeholders(10 + histCols.length)})`);
     this.runInTx(() => {
       for (const d of daySet) {
         delDay.run(d);
@@ -491,7 +496,7 @@ export class Ledger {
         if (!byModel) continue; // 该日已无任何请求且无归因会话 (数据被清理的极端形态)
         for (const [model, acc] of byModel) {
           insDay.run(d, model, acc.inT, acc.outT, acc.crT, acc.cwT, acc.sesses.size, acc.nReq,
-            JSON.stringify(acc.ctxHist), JSON.stringify(acc.outHist), acc.nTurns, acc.nTools, JSON.stringify(acc.maxCtxHist));
+            acc.nTurns, acc.nTools, ...acc.ctxHist, ...acc.outHist, ...acc.maxCtxHist);
         }
       }
     });
@@ -536,7 +541,8 @@ export class Ledger {
     if (harnesses.length === 0) {
       // 列清单是冻结发射面 — 谓词插值保持单份 (与 requestsSince 同惯用法)
       const pred = sinceDay === null ? "" : " WHERE day >= ?";
-      const rows = this.db.prepare(`SELECT day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, ctx_hist, out_hist, n_turns, n_tools, max_ctx_hist FROM day_stats${pred} ORDER BY day`)
+      const cols = `day, model, in_t, out_t, cr_t, cw_t, n_sess, n_req, n_turns, n_tools, ${[...CTX_HIST_COLS, ...OUT_HIST_COLS, ...MCTX_HIST_COLS].join(", ")}`;
+      const rows = this.db.prepare(`SELECT ${cols} FROM day_stats${pred} ORDER BY day`)
         .all(...(sinceDay === null ? [] : [sinceDay]));
       const byDay = new Map<string, ProfileModelV2[]>();
       for (const r of rows) {
@@ -556,11 +562,11 @@ export class Ledger {
           cw: r.cw_t as number,
           nSess: r.n_sess as number,
           nReq,
-          ctxHist: parseHist(String(r.ctx_hist), CTX_BUCKET_COUNT, nReq, "ctx_hist", where),
-          outHist: parseHist(String(r.out_hist), OUT_BUCKET_COUNT, nReq, "out_hist", where),
+          ctxHist: histFromCols(r, CTX_HIST_COLS, nReq, "ctx_hist", where),
+          outHist: histFromCols(r, OUT_HIST_COLS, nReq, "out_hist", where),
           nTurns: r.n_turns as number,
           nToolCalls: r.n_tools as number,
-          maxCtxHist: parseHist(String(r.max_ctx_hist), CTX_BUCKET_COUNT, null, "max_ctx_hist", where),
+          maxCtxHist: histFromCols(r, MCTX_HIST_COLS, null, "max_ctx_hist", where),
         });
       }
       return sortProfileDays(byDay);

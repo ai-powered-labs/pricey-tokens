@@ -47,7 +47,7 @@ describe("Ledger 开库与版本守卫", () => {
   it("首开建表并落 schema_version; 重开复用", async () => {
     const home = await freshHome();
     const l1 = await Ledger.open(home);
-    expect(l1.getMeta("schema_version")).toBe("3");
+    expect(l1.getMeta("schema_version")).toBe("4");
     l1.close();
     const l2 = await Ledger.open(home);
     expect(l2.requestCount()).toBe(0);
@@ -114,7 +114,7 @@ describe("day_stats 重算", () => {
     expect(m.nSess).toBe(2);
     expect(m.in).toBe(100100);
     expect(m.ctxHist[0]).toBe(1);
-    expect(m.ctxHist[5]).toBe(1);
+    expect(m.ctxHist[2]).toBe(1); // (64k,128k]
     expect(m.ctxHist.reduce((a, b) => a + b, 0)).toBe(2); // Σhist == nReq
     l.close();
   });
@@ -152,7 +152,7 @@ describe("day_stats 重算", () => {
     l.close();
     const {createSqlite} = await import("../src/sqlite.js");
     const db = await createSqlite(join(home, "pricey-tokens", "usage.db"));
-    db.exec(`UPDATE day_stats SET ctx_hist = '[1,0,0,0,0,0,0,0,0,0,0,0]'`); // Σ=1 但桶错位 + nReq 不匹配路径
+    db.exec("UPDATE day_stats SET ctx_gt32k = ctx_gt32k + 1"); // Σ=2 ≠ nReq=1 (外部改写模拟)
     db.exec(`UPDATE day_stats SET n_req = 5`); // Σhist(1) ≠ nReq(5)
     db.close();
     const l2 = await Ledger.open(home);
@@ -212,13 +212,13 @@ describe("ProfileV2 发射 (形状 + 不变量 + 双路径同构)", () => {
     // 形状断言: day / models(用量降序) / 不变量
     expect(materialized[0]!.day).toBe(localDayKey(T));
     const glm = materialized[0]!.models.find((m) => m.id === "zai/glm-5.3")!;
-    expect(glm.ctxHist[5]).toBe(1);
+    expect(glm.ctxHist[2]).toBe(1); // (64k,128k]
     const cc = materialized[0]!.models.find((m) => m.id === "claude-sonnet-5")!;
-    expect(cc.ctxHist[1]).toBe(1); // (4k,8k]
+    expect(cc.ctxHist[0]).toBe(1); // (0,32k] 合并桶
     for (const d of materialized) {
       for (const m of d.models) {
         expect(m.ctxHist.reduce((a, b) => a + b, 0)).toBe(m.nReq);
-        expect(m.ctxHist).toHaveLength(12);
+        expect(m.ctxHist).toHaveLength(9);
       }
     }
     l.close();
@@ -267,11 +267,11 @@ describe("ProfileV2 发射 (形状 + 不变量 + 双路径同构)", () => {
     expect(m.nReq).toBe(3);
     expect(m.nToolCalls).toBe(3); // request 各归各 Σ
     expect(m.nTurns).toBe(3); // 两会话轮次和 (1+2)
-    expect(m.outHist).toEqual([1, 1, 0, 0, 0, 0, 0, 0, 1]); // 50→桶0, 1500→桶1, 200000→桶8; Σ==nReq
+    expect(m.outHist).toEqual([2, 0, 0, 1]); // 50→桶0, 1500→桶0 (32k 合并), 200000→桶3; Σ==nReq
     expect(m.ctxHist.reduce((a, b) => a + b, 0)).toBe(3);
-    // 会话原子: sA max_ctx 100000 (桶5) + sB max_ctx 300000 (桶8: 256k~512k), Σ=2 ≤ nSess=2
+    // 会话原子: sA max_ctx 100000 (桶2: 64k~128k) + sB max_ctx 300000 (桶5: 256k~512k), Σ=2 ≤ nSess=2
+    expect(m.maxCtxHist[2]).toBe(1);
     expect(m.maxCtxHist[5]).toBe(1);
-    expect(m.maxCtxHist[8]).toBe(1);
     expect(m.maxCtxHist.reduce((a, b) => a + b, 0)).toBe(2);
     expect(m.nSess).toBe(2);
     l.close();
@@ -284,7 +284,7 @@ describe("ProfileV2 发射 (形状 + 不变量 + 双路径同构)", () => {
     l.close();
     const {createSqlite} = await import("../src/sqlite.js");
     const db = await createSqlite(join(home, "pricey-tokens", "usage.db"));
-    db.exec(`UPDATE day_stats SET out_hist = '[0,0,0,0,0,0,0,0,0]'`); // Σ=0 ≠ nReq=1
+    db.exec("UPDATE day_stats SET out_gt0 = 0"); // Σ=0 ≠ nReq=1 (首桶清零)
     db.close();
     const l2 = await Ledger.open(home);
     expect(() => l2.profileDays(null, [])).toThrow("out_hist 损坏");
@@ -295,7 +295,7 @@ describe("ProfileV2 发射 (形状 + 不变量 + 双路径同构)", () => {
     ingestBatch(l3, [row({reqKey: "a", ts: T, inT: 100000})]);
     l3.close();
     const db2 = await createSqlite(join(home2, "pricey-tokens", "usage.db"));
-    db2.exec(`UPDATE day_stats SET max_ctx_hist = '[2,0,0,0,0,0,0,0,0,0,0,0]'`);
+    db2.exec("UPDATE day_stats SET mctx_gt0 = 2"); // 2 会话贡献 > nSess=1
     db2.close();
     const l4 = await Ledger.open(home2);
     expect(() => l4.profileDays(null, [])).toThrow("max_ctx_hist 损坏");
@@ -417,19 +417,19 @@ describe("session_stats 物化 (主模型归因 + 轮次 join)", () => {
     const d2 = T + 86400000;
     ingestBatch(l, [row({reqKey: "a", sessKey: "s0", ts: T, inT: 100000, crT: 0, cwT: 0})]); // 首日: 归因日 d1
     let stats = await readDayStats(home);
-    const d1Row = stats.find((r) => r.day === localDayKey(T)) as unknown as {max_ctx_hist: string; n_turns: number};
-    expect(JSON.parse(d1Row.max_ctx_hist).reduce((a: number, b: number) => a + b, 0)).toBe(1); // d1 有 1 会话贡献
+    const d1Row = stats.find((r) => r.day === localDayKey(T)) as unknown as {n_turns: number; mctx_gt64k: number};
+    expect(d1Row.mctx_gt64k).toBe(1); // d1 有 1 会话贡献 (100000 ∈ (64k,128k])
     // 次日新请求 → 会话 last_ts 迁 d2 → 归因日迁 d2, d1 的贡献必须消失
     ingestBatch(l, [row({reqKey: "b", sessKey: "s0", ts: d2, inT: 50000, crT: 0, cwT: 0})]);
     stats = await readDayStats(home);
-    const d1After = stats.find((r) => r.day === localDayKey(T)) as unknown as {max_ctx_hist: string};
-    const d2After = stats.find((r) => r.day === localDayKey(d2)) as unknown as {max_ctx_hist: string; n_sess: number; n_req: number};
-    expect(JSON.parse(d1After.max_ctx_hist).reduce((a: number, b: number) => a + b, 0)).toBe(0); // d1 贡献迁走
-    expect(JSON.parse(d2After.max_ctx_hist).reduce((a: number, b: number) => a + b, 0)).toBe(1); // d2 接收
+    const d1After = stats.find((r) => r.day === localDayKey(T)) as unknown as {mctx_gt64k: number};
+    const d2After = stats.find((r) => r.day === localDayKey(d2)) as unknown as {mctx_gt64k: number; n_sess: number; n_req: number};
+    expect(d1After.mctx_gt64k).toBe(0); // d1 贡献迁走
+    expect(d2After.mctx_gt64k).toBe(1); // d2 接收
     expect(d2After.n_sess).toBe(1);
     expect(d2After.n_req).toBe(1);
     // 全局: 会话恰一增量 (两日直方图总和恒 1)
-    const total = stats.reduce((a, r) => a + JSON.parse((r as {max_ctx_hist: string}).max_ctx_hist).reduce((x: number, y: number) => x + y, 0), 0);
+    const total = stats.reduce((a, r) => a + (r as {[k: string]: number})["mctx_gt0"] + (r as {[k: string]: number})["mctx_gt32k"] + (r as {[k: string]: number})["mctx_gt64k"] + (r as {[k: string]: number})["mctx_gt128k"] + (r as {[k: string]: number})["mctx_gt200k"] + (r as {[k: string]: number})["mctx_gt256k"] + (r as {[k: string]: number})["mctx_gt512k"] + (r as {[k: string]: number})["mctx_gt1m"] + (r as {[k: string]: number})["mctx_gt2m"], 0);
     expect(total).toBe(1);
     l.close();
   });
@@ -451,15 +451,15 @@ describe("session_stats 物化 (主模型归因 + 轮次 join)", () => {
       ],
     );
     const stats = await readDayStats(home);
-    const glm = stats.find((r) => r.model === "zai/glm-5.3") as unknown as {n_turns: number; max_ctx_hist: string; n_sess: number; n_req: number};
+    const glm = stats.find((r) => r.model === "zai/glm-5.3") as unknown as {n_turns: number; mctx_gt64k: number; n_sess: number; n_req: number};
     // glm 行: sA 归因 (2 turns, 桶5 +1) + sB 的请求侧 (n_sess 2, n_req 2 — sB 两请求都算)
     expect(glm.n_turns).toBe(2);
-    expect(JSON.parse(glm.max_ctx_hist)[5]).toBe(1);
+    expect(glm.mctx_gt64k).toBe(1); // (64k,128k] 会话最深上下文落桶
     expect(glm.n_sess).toBe(2);
     expect(glm.n_req).toBe(2);
-    const cc = stats.find((r) => r.model === "claude-sonnet-5") as unknown as {n_turns: number; max_ctx_hist: string; n_sess: number; n_req: number};
+    const cc = stats.find((r) => r.model === "claude-sonnet-5") as unknown as {n_turns: number; mctx_gt0: number; n_sess: number; n_req: number};
     expect(cc.n_turns).toBe(1); // sB 归因 claude (主模型), 1 turn
-    expect(JSON.parse(cc.max_ctx_hist)[2]).toBe(1); // 桶2 (8k,16k]
+    expect(cc.mctx_gt0).toBe(1); // (0,32k] 会话最深上下文落桶
     expect(cc.n_req).toBe(1); // 请求侧: claude 1 请求
     expect(cc.n_sess).toBe(1);
     l.close();
@@ -541,7 +541,7 @@ describe("v2 → v3 迁移 (自动回填)", () => {
     db.close();
   }
 
-  it("v2 库首开 → ALTER + 全量回填: session_stats 真实 / day_stats 新列真实 / 存量 n_tools 与 n_turns 恒 0 / 版本升 3 / 二开幂等", async () => {
+  it("v2 库首开 → 迁移 v4 宽列 + 全量回填: session_stats 真实 / day_stats 独立列真实 / 存量 n_tools 与 n_turns 恒 0 / 二开幂等", async () => {
     const home = await mkdtemp(join(tmpdir(), "pt-mig-"));
     homes.push(() => rm(home, {recursive: true, force: true}));
     await makeV2Ledger(home, [
@@ -549,23 +549,24 @@ describe("v2 → v3 迁移 (自动回填)", () => {
       {reqKey: "b", ts: T + 1000, sessKey: "s1", inT: 5000},
     ]);
     const l = await Ledger.open(home);
-    expect(l.getMeta("schema_version")).toBe("3");
+    expect(l.getMeta("schema_version")).toBe("4");
     // session_stats 从 requests 现算 (真实回填): 2 会话, max_ctx 家族路由
     const sess = await readSessions(home);
     expect(sess).toHaveLength(2);
     expect(sess.find((s) => s.sess_key === "s0")!.max_ctx).toBe(100000 + 10 + 5);
     expect(sess.every((s) => s.n_turns === 0 && s.n_tools === 0)).toBe(true); // 存量无源恒 0
-    // day_stats 新列: ctx_hist/out_hist 从 requests 现算真实; n_turns/n_tools/max_ctx_hist 结构在位
+    // day_stats 宽列 (v4): 直方图独立列从 requests 现算真实; 旧 TEXT 复合列不复存在
     const stats = await readDayStats(home);
-    const m = stats[0] as unknown as {ctx_hist: string; out_hist: string; n_tools: number; n_turns: number; max_ctx_hist: string; n_req: number};
-    expect(m.n_req).toBe(2);
-    expect(JSON.parse(m.ctx_hist).reduce((a: number, b: number) => a + b, 0)).toBe(2);
-    expect(JSON.parse(m.out_hist).reduce((a: number, b: number) => a + b, 0)).toBe(2); // ΣoutHist==nReq
-    expect(m.n_tools).toBe(0); // 存量行 n_tools=0
-    expect(m.n_turns).toBe(0); // 无 turn_events
-    expect(JSON.parse(m.max_ctx_hist).reduce((a: number, b: number) => a + b, 0)).toBe(2); // 会话数真实回填
+    const m = stats[0] as unknown as Record<string, number>;
+    expect(m["n_req"]).toBe(2);
+    expect(m["ctx_gt0"] + m["ctx_gt32k"] + m["ctx_gt64k"] + m["ctx_gt128k"] + m["ctx_gt200k"] + m["ctx_gt256k"] + m["ctx_gt512k"] + m["ctx_gt1m"] + m["ctx_gt2m"]).toBe(2); // ΣctxHist==nReq
+    expect(m["out_gt0"] + m["out_gt32k"] + m["out_gt64k"] + m["out_gt128k"]).toBe(2); // ΣoutHist==nReq
+    expect(m["n_tools"]).toBe(0); // 存量行 n_tools=0
+    expect(m["n_turns"]).toBe(0); // 无 turn_events
+    expect(m["mctx_gt0"] + m["mctx_gt32k"] + m["mctx_gt64k"] + m["mctx_gt128k"] + m["mctx_gt200k"] + m["mctx_gt256k"] + m["mctx_gt512k"] + m["mctx_gt1m"] + m["mctx_gt2m"]).toBe(2); // 会话数真实回填
+    expect("ctx_hist" in m).toBe(false); // 旧复合列已消亡 (DROP 重建)
     l.close();
-    // 二开: 版本 3 直通, 数据不变
+    // 二开: 版本 4 直通, 数据不变
     const l2 = await Ledger.open(home);
     expect(JSON.stringify(await readSessions(home))).toBe(JSON.stringify(sess));
     l2.close();

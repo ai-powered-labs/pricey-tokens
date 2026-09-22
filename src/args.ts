@@ -1,10 +1,10 @@
 // args.ts — CLI 参数手写解析 (零依赖, 勿引 yargs)
 // 职责边界: argv → Options, 集中完成全部默认值/校验/归一化 — 下游拿到的恒为合法值
 // (核心逻辑免参数检查)。解析失败/未知参数抛 ArgsError (调用方转 stderr + exit 1)。
-// 形态支持: --flag / --opt value / --opt=value; --days all 或数字; --agent 可重复
+// 形态支持: --flag / --opt value / --opt=value; --days all 或数字; --harness 可重复
 // 出现且值支持逗号分隔。
-import type {AgentId, Options} from "./types.js";
-import {ALL_AGENTS} from "./types.js";
+import type {HarnessId, Options} from "./types.js";
+import {ALL_HARNESSES} from "./types.js";
 
 export class ArgsError extends Error {}
 
@@ -37,7 +37,7 @@ export function parseArgs(rawArgv: string[]): Options {
     share: false,
     yes: false,
     days: 30,
-    agents: [],
+    harnesses: [],
     api: DEFAULT_API,
     site: DEFAULT_SITE,
   };
@@ -52,7 +52,7 @@ export function parseArgs(rawArgv: string[]): Options {
     else if (arg === "--share") opts.share = true;
     else if (arg === "--yes" || arg === "-y") opts.yes = true;
     else if (arg === "--days") parseDays(value());
-    else if (arg === "--agent") parseAgents(value());
+    else if (arg === "--harness") parseHarnesses(value());
     else if (arg === "--api") opts.api = normalizeBase(value());
     else if (arg === "--site") opts.site = siteValue(value());
     else throw new ArgsError(`未知参数: ${arg} (用 --help 查看用法)`);
@@ -70,11 +70,11 @@ export function parseArgs(rawArgv: string[]): Options {
     opts.days = n;
   }
 
-  function parseAgents(v: string): void {
+  function parseHarnesses(v: string): void {
     for (const part of v.split(",")) {
       const a = part.trim();
-      if (!ALL_AGENTS.includes(a as AgentId)) throw new ArgsError(`--agent 参数值非法: ${a} (应为 ${ALL_AGENTS.join(" / ")} 的逗号分隔)`);
-      if (!opts.agents.includes(a as AgentId)) opts.agents.push(a as AgentId);
+      if (!ALL_HARNESSES.includes(a as HarnessId)) throw new ArgsError(`--harness 参数值非法: ${a} (应为 ${ALL_HARNESSES.join(" / ")} 的逗号分隔)`);
+      if (!opts.harnesses.includes(a as HarnessId)) opts.harnesses.push(a as HarnessId);
     }
   }
 
@@ -97,7 +97,7 @@ export const HELP_TEXT = `pricey-tokens — 本机 AI coding agent 用量收集�
   --share            上传后打印分享 URL (须与 --upload 同用)
   --yes              跳过上传交互确认 (非交互环境的显式授权)
   --days N|all       收集窗口天数 (默认 30; all = 全量)
-  --agent LIST       只收集指定源, 逗号分隔: opencode,claude-code,codex
+  --harness LIST       只收集指定源, 逗号分隔: opencode,claude-code,codex
   --api URL          上传 API base (默认 https://pricey-tokens.lambda.lc)
   --site URL         分享站点 base (默认 https://pricey-tokens.lambda.lc/calc/,
                      本地开发: http://localhost:PORT/calc/)

@@ -66,5 +66,5 @@ export async function collectClaude(paths: string[], sinceMs: number | null): Pr
       skippedFiles.push(`${displayName} (${errMsg(e)})`);
     }
   }
-  return {agent: "claude-code", records, skippedFiles};
+  return {harness: "claude-code", records, skippedFiles};
 }

@@ -1,6 +1,6 @@
 // guards.ts — jsonl 收集器共享的输入守卫
 // 职责边界: claude/codex 收集器同款守卫的 SSOT (站点侧两份同款注记 "待第三家
-// jsonl agent 出现再抽取共享", CLI 侧三家齐备即抽取)。opencode.ts 的 isObj 有意
+// jsonl harness 出现再抽取共享", CLI 侧三家齐备即抽取)。opencode.ts 的 isObj 有意
 // 排斥数组 (message data 契约是 JSON 对象), 与本处放行数组版语义不同, 勿盲目合并。
 
 // 对象判定 (放行数组 — jsonl 事件行的 message/payload/info 字段实测未见数组形态,

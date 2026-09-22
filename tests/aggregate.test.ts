@@ -1,6 +1,6 @@
 // aggregate.test.ts — 日粒度聚合与 ProfileV1 构造测试
 // 覆盖: 同模型同日合并 (ts 取组内 max)、跨源同名模型合并、spanDays 计算与钳制、
-// 月速率 = 总量×30/spanDays 自洽 (引擎外推还原)、agent 字段单源/混合、空输入。
+// 月速率 = 总量×30/spanDays 自洽 (引擎外推还原)、harness 字段单源/混合、空输入。
 import {describe, expect, it} from "bun:test";
 import {aggregate} from "../src/aggregate.js";
 import type {ParseResult, UsageRecord} from "../src/types.js";
@@ -21,7 +21,7 @@ import {DAY, T0} from "./fixtures.js";
 describe("aggregate 日粒度", () => {
   it("同模型同日多记录合并为一条, ts 取组内最大值", () => {
     const r = aggregate(
-      [{agent: "opencode", records: [rec("m", T0, {inputTokens: 1}), rec("m", T0 + 3600000, {inputTokens: 2, outputTokens: 5}), rec("m", T0 + 7200000, {inputTokens: 3})], skippedFiles: []}],
+      [{harness: "opencode", records: [rec("m", T0, {inputTokens: 1}), rec("m", T0 + 3600000, {inputTokens: 2, outputTokens: 5}), rec("m", T0 + 7200000, {inputTokens: 3})], skippedFiles: []}],
       "test",
     )!;
     expect(r.daily).toHaveLength(1);
@@ -32,7 +32,7 @@ describe("aggregate 日粒度", () => {
     const r = aggregate(
       [
         {
-          agent: "opencode",
+          harness: "opencode",
           records: [rec("b", T0 + DAY, {inputTokens: 1}), rec("a", T0, {inputTokens: 1}), rec("b", T0, {inputTokens: 1})],
           skippedFiles: [],
         },
@@ -46,8 +46,8 @@ describe("aggregate 日粒度", () => {
   it("跨源同名模型在 ProfileV1 models 合并为一条", () => {
     const r = aggregate(
       [
-        {agent: "opencode", records: [rec("glm-5.3", T0, {inputTokens: 100})], skippedFiles: []},
-        {agent: "claude-code", records: [rec("glm-5.3", T0, {inputTokens: 50})], skippedFiles: []},
+        {harness: "opencode", records: [rec("glm-5.3", T0, {inputTokens: 100})], skippedFiles: []},
+        {harness: "claude-code", records: [rec("glm-5.3", T0, {inputTokens: 50})], skippedFiles: []},
       ],
       "test",
     )!;
@@ -60,7 +60,7 @@ describe("aggregate ProfileV1 (月速率口径)", () => {
   it("spanDays = ceil(跨度); 月速率 = 总量×30/spanDays (引擎外推还原自洽)", () => {
     // 两日跨度 (T0 与 T0+2*DAY → 日粒度 3 天组? 不: 记录 2 条, ts 跨 2 天 → spanDays = 2)
     const r = aggregate(
-      [{agent: "opencode", records: [rec("m", T0, {inputTokens: 300}), rec("m", T0 + 2 * DAY, {inputTokens: 300})], skippedFiles: []}],
+      [{harness: "opencode", records: [rec("m", T0, {inputTokens: 300}), rec("m", T0 + 2 * DAY, {inputTokens: 300})], skippedFiles: []}],
       "test",
     )!;
     expect(r.profile.spanDays).toBe(2);
@@ -71,22 +71,22 @@ describe("aggregate ProfileV1 (月速率口径)", () => {
   });
 
   it("同刻记录 → spanDays 钳下限 1 (防除零)", () => {
-    const r = aggregate([{agent: "codex", records: [rec("m", T0, {inputTokens: 30})], skippedFiles: []}], "test")!;
+    const r = aggregate([{harness: "codex", records: [rec("m", T0, {inputTokens: 30})], skippedFiles: []}], "test")!;
     expect(r.profile.spanDays).toBe(1);
     expect(r.profile.models[0]!.inputT).toBe(900); // 30 × 30 / 1
   });
 
-  it("agent: 单源 = 源名, 多源 = mixed; 契约固定字段齐备", () => {
-    const single = aggregate([{agent: "codex", records: [rec("m", T0)], skippedFiles: []}], "test")!;
-    expect(single.profile.agent).toBe("codex");
+  it("harness: 单源 = 源名, 多源 = mixed; 契约固定字段齐备", () => {
+    const single = aggregate([{harness: "codex", records: [rec("m", T0)], skippedFiles: []}], "test")!;
+    expect(single.profile.harness).toBe("codex");
     const multi = aggregate(
       [
-        {agent: "codex", records: [rec("m", T0)], skippedFiles: []},
-        {agent: "opencode", records: [rec("m2", T0)], skippedFiles: []},
+        {harness: "codex", records: [rec("m", T0)], skippedFiles: []},
+        {harness: "opencode", records: [rec("m2", T0)], skippedFiles: []},
       ],
       "test",
     )!;
-    expect(multi.profile.agent).toBe("mixed");
+    expect(multi.profile.harness).toBe("mixed");
     expect(multi.profile.schema).toBe("pricey-tokens-profile/v1");
     expect(multi.profile.trust).toBe("anon");
     expect(multi.profile.planUsed).toBeNull();
@@ -96,14 +96,14 @@ describe("aggregate ProfileV1 (月速率口径)", () => {
 
   it("空输入 → null", () => {
     expect(aggregate([], "test")).toBeNull();
-    expect(aggregate([{agent: "opencode", records: [], skippedFiles: []}], "test")).toBeNull();
+    expect(aggregate([{harness: "opencode", records: [], skippedFiles: []}], "test")).toBeNull();
   });
 
   it("models 按月速率总量降序输出", () => {
     const r = aggregate(
       [
         {
-          agent: "opencode",
+          harness: "opencode",
           records: [rec("small", T0, {inputTokens: 1}), rec("big", T0, {inputTokens: 10000})],
           skippedFiles: [],
         },

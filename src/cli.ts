@@ -49,18 +49,18 @@ async function main(): Promise<number> {
   }
 
   const sinceMs = opts.days === "all" ? null : Date.now() - opts.days * 86400000;
-  const {results, statuses} = await collectAll({agents: opts.agents, sinceMs});
+  const {results, statuses} = await collectAll({harnesses: opts.harnesses, sinceMs});
 
   // 探测报告 (stderr — 保持 --json 的 stdout 纯净)
   for (const s of statuses) {
-    err(`[${s.agent}] ${s.found ? "✓" : "✗ 未发现"} ${s.detail}`);
+    err(`[${s.harness}] ${s.found ? "✓" : "✗ 未发现"} ${s.detail}`);
   }
   const skipped = results.flatMap((r) => r.skippedFiles);
   for (const s of skipped) err(`[skip] ${s}`);
   const noData = results.every((r) => r.records.length === 0);
   if (noData) {
     err(`\n窗口内 (${opts.days === "all" ? "全量" : `${opts.days} 天`}) 未收集到任何用量记录。`);
-    err("若你确实在用这些 agent, 检查数据目录权限或提 issue: https://github.com/ai-powered-labs/pricey-tokens");
+    err("若你确实在用这些工具, 检查数据目录权限或提 issue: https://github.com/ai-powered-labs/pricey-tokens");
     return 1;
   }
 
@@ -70,7 +70,7 @@ async function main(): Promise<number> {
     return 1;
   }
   const {profile, span} = agg;
-  err(`\n聚合: ${profile.models.length} 个模型, 跨度 ${profile.spanDays} 天 (${new Date(span.firstTs).toISOString().slice(0, 10)} ~ ${new Date(span.lastTs).toISOString().slice(0, 10)}), agent=${profile.agent}`);
+  err(`\n聚合: ${profile.models.length} 个模型, 跨度 ${profile.spanDays} 天 (${new Date(span.firstTs).toISOString().slice(0, 10)} ~ ${new Date(span.lastTs).toISOString().slice(0, 10)}), harness=${profile.harness}`);
 
   let exit = 0;
 

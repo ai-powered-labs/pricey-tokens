@@ -25,7 +25,7 @@ async function runCli(args: string[], env: Record<string, string>): Promise<RunR
   return {code, stdout, stderr};
 }
 
-// 无 agent 数据的临时 home (HOME + XDG_CONFIG_HOME 都指走, 防污染真实 device-key)
+// 无 harness 数据的临时 home (HOME + XDG_CONFIG_HOME 都指走, 防污染真实 device-key)
 async function emptyHome(): Promise<{home: string; env: Record<string, string>; cleanup: () => Promise<void>}> {
   const home = await mkdtemp(join(tmpdir(), "pt-cli-"));
   return {
@@ -95,7 +95,7 @@ describe("cli 数据出口", () => {
       expect(r.code).toBe(0);
       const profile = JSON.parse(r.stdout); // stdout 纯 JSON (任何诊断混入都会炸)
       expect(profile.schema).toBe("pricey-tokens-profile/v1");
-      expect(profile.agent).toBe("claude-code");
+      expect(profile.harness).toBe("claude-code");
       expect(r.stderr).toContain("[claude-code]");
     } finally {
       await h.cleanup();

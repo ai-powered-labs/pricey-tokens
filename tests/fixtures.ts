@@ -1,5 +1,5 @@
 // fixtures.ts — 测试合成数据构造器 (隐私红线: 仅合成数据, 严禁引入任何真实用户数据)
-// 职责边界: 三家 agent 数据格式的最小闭环构造 (jsonl 行 / SQLite 库文件 / 临时目录),
+// 职责边界: 三家 harness 数据格式的最小闭环构造 (jsonl 行 / SQLite 库文件 / 临时目录),
 // 形态移植自站点 tests/fixtures.ts (合成数值, 字段结构按 2026-09 实测)。
 import {mkdtemp, mkdir, writeFile, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";

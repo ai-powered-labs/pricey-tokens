@@ -34,7 +34,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: node dist/cli.js --version
-      # CI runner 无 agent 数据: exit 1 (未收集到) 与 0 都是"跑通", 只有 ≥2 (意外崩溃) 才红。
+      # CI runner 无 harness 数据: exit 1 (未收集到) 与 0 都是"跑通", 只有 ≥2 (意外崩溃) 才红。
       # node 须以 || 挂接 — GH Actions 默认 bash -e 下, 裸 `;` 分隔会在非零退出时
       # 中止整个步骤, 后续守卫不可达
       - run: |

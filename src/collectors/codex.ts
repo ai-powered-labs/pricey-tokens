@@ -100,5 +100,5 @@ export async function collectCodex(paths: string[], sinceMs: number | null): Pro
       skippedFiles.push(`${path} (${errMsg(e)})`);
     }
   }
-  return {agent: "codex", records, skippedFiles};
+  return {harness: "codex", records, skippedFiles};
 }

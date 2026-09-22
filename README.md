@@ -25,7 +25,7 @@ $ npx pricey-tokens --days all      # 全量历史
 $ npx pricey-tokens --json          # ProfileV1 JSON 到 stdout (月速率口径)
 $ npx pricey-tokens --upload        # 上传社区档案 (上传前完整预览, 需确认)
 $ npx pricey-tokens --upload --share --yes   # 上传并打印分享 URL (脚本场景)
-$ npx pricey-tokens --agent opencode,claude-code   # 只收集指定源
+$ npx pricey-tokens --harness opencode,claude-code   # 只收集指定源
 ```
 
 要求: node ≥ 20.10 或 bun (读 opencode 库需 bun 或 node ≥ 22.5, 见下)。
@@ -39,7 +39,7 @@ $ npx pricey-tokens --agent opencode,claude-code   # 只收集指定源
 | `--share` | 上传后打印分享 URL (须与 `--upload` 同用) | 关 |
 | `--yes` | 跳过上传交互确认 (非交互环境的显式授权) | 关 |
 | `--days N\|all` | 收集窗口 (天); `all` = 全量历史 | 30 |
-| `--agent LIST` | 只收集指定源: `opencode,claude-code,codex` 逗号分隔 | 全部 |
+| `--harness LIST` | 只收集指定源: `opencode,claude-code,codex` 逗号分隔 | 全部 |
 | `--api URL` | 上传 API base | `https://pricey-tokens.lambda.lc` |
 | `--site URL` | 分享站点 base (本地开发 `http://localhost:PORT/calc/`) | `https://pricey-tokens.lambda.lc/calc/` |
 | `--help` / `--version` | 帮助 / 版本 | — |
@@ -66,7 +66,7 @@ $ npx pricey-tokens --agent opencode,claude-code   # 只收集指定源
 
 ## 数据源
 
-| agent | 位置 | 说明 |
+| harness | 位置 | 说明 |
 |---|---|---|
 | opencode | `~/.local/share/opencode/opencode*.db` | SQLite 双 schema 自动探测; main/stable/local 等多通道库全收 (各通道独立库不重复; 非常规的库副本同收会双计, 注意) |
 | claude-code | `~/.claude/projects/**/*.jsonl` | messageId 去重取末值 (流式 chunk 口径) |
@@ -94,7 +94,7 @@ $ pricey-tokens --upload --days 30
 
 {
   "schema": "pricey-tokens-profile/v1",
-  "agent": "mixed",
+  "harness": "mixed",
   "spanDays": 30,
   "models": [
     { "id": "zai/glm-5.3", "inputT": 2413586490, "outputT": 174372446,

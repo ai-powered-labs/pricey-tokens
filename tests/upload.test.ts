@@ -13,7 +13,7 @@ import type {ProfileV1} from "../src/types.js";
 
 const profile: ProfileV1 = {
   schema: "pricey-tokens-profile/v1",
-  agent: "opencode",
+  harness: "opencode",
   spanDays: 30,
   models: [{id: "zai/glm-5.3", inputT: 100, outputT: 10, cacheReadT: 200, cacheWriteT: 0}],
   planUsed: null,

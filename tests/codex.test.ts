@@ -18,7 +18,7 @@ describe("collectCodex", () => {
         codexTokenLine({ts: T0 + 3000, total: [300, 120, 500]}),
       ]);
       const r = await collectCodex([f], null);
-      expect(r.agent).toBe("codex");
+      expect(r.harness).toBe("codex");
       expect(r.records).toEqual([
         {model: "gpt-5.6", ts: T0 + 3000, inputTokens: 300, outputTokens: 500, cacheReadTokens: 120, cacheWriteTokens: 0},
       ]);

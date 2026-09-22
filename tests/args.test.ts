@@ -1,5 +1,5 @@
 // args.test.ts — CLI 参数解析测试
-// 覆盖: 布尔旗标、--days 数字/all/非法、--agent 逗号与重复、--api 尾斜杠归一、
+// 覆盖: 布尔旗标、--days 数字/all/非法、--harness 逗号与重复、--api 尾斜杠归一、
 // --site 校验、默认值、未知参数与 --share 前置条件。
 import {describe, expect, it} from "bun:test";
 import {parseArgs, ArgsError, DEFAULT_API, DEFAULT_SITE} from "../src/args.js";
@@ -13,7 +13,7 @@ describe("parseArgs 默认值", () => {
       share: false,
       yes: false,
       days: 30,
-      agents: [],
+      harnesses: [],
       api: DEFAULT_API,
       site: DEFAULT_SITE,
     });
@@ -44,14 +44,14 @@ describe("parseArgs 旗标与带值参数", () => {
     expect(() => parseArgs(["--days"])).toThrow(ArgsError);
   });
 
-  it("--agent 逗号分隔 / 重复出现 / 去重", () => {
-    expect(parseArgs(["--agent", "opencode,claude-code"]).agents).toEqual(["opencode", "claude-code"]);
-    expect(parseArgs(["--agent", "opencode", "--agent", "codex"]).agents).toEqual(["opencode", "codex"]);
-    expect(parseArgs(["--agent", "opencode", "--agent", "opencode"]).agents).toEqual(["opencode"]);
+  it("--harness 逗号分隔 / 重复出现 / 去重", () => {
+    expect(parseArgs(["--harness", "opencode,claude-code"]).harnesses).toEqual(["opencode", "claude-code"]);
+    expect(parseArgs(["--harness", "opencode", "--harness", "codex"]).harnesses).toEqual(["opencode", "codex"]);
+    expect(parseArgs(["--harness", "opencode", "--harness", "opencode"]).harnesses).toEqual(["opencode"]);
   });
 
-  it("--agent 非法值报错", () => {
-    expect(() => parseArgs(["--agent", "cursor"])).toThrow(ArgsError);
+  it("--harness 非法值报错", () => {
+    expect(() => parseArgs(["--harness", "cursor"])).toThrow(ArgsError);
   });
 
   it("--api 尾斜杠归一; --api=X 形态", () => {

@@ -1,5 +1,5 @@
-// discover.ts — 本机 agent 数据源探测与收集编排
-// 职责边界: 按各 agent 的约定数据位置探测存在性, 枚举文件并调用对应收集器; 输出
+// discover.ts — 本机 harness 数据源探测与收集编排
+// 职责边界: 按各 harness 的约定数据位置探测存在性, 枚举文件并调用对应收集器; 输出
 // 探测报告 (每源 found/缺失) 供 CLI 摘要与测试断言。数据位置约定:
 //   - opencode: $XDG_DATA_HOME/opencode/opencode*.db (缺省 ~/.local/share/opencode/)
 //     收集数据目录下全部 opencode*.db — main/stable/local/fork 各通道安装各有独立
@@ -11,15 +11,15 @@
 // 单源收集失败 (库损坏 / 列缺失) 转该源 skipped 不拖垮其他源。
 import {readdir, stat} from "node:fs/promises";
 import {join} from "node:path";
-import type {AgentId, ParseResult, UsageRecord} from "./types.js";
-import {ALL_AGENTS} from "./types.js";
+import type {HarnessId, ParseResult, UsageRecord} from "./types.js";
+import {ALL_HARNESSES} from "./types.js";
 import {errMsg} from "./guards.js";
 import {collectOpencode} from "./collectors/opencode.js";
 import {collectClaude} from "./collectors/claude.js";
 import {collectCodex} from "./collectors/codex.js";
 
 export interface SourceStatus {
-  agent: AgentId;
+  harness: HarnessId;
   found: boolean;
   detail: string; // found: 文件数/库路径; 未 found: 探测位置
 }
@@ -73,14 +73,14 @@ function dirDayEndMs(path: string): number | null {
 }
 
 export interface CollectOptions {
-  agents: AgentId[]; // 空 = 全部
+  harnesses: HarnessId[]; // 空 = 全部
   sinceMs: number | null; // null = 全量
   home?: string; // 注入 home (测试); 缺省 os.homedir()
 }
 
 export async function collectAll(opts: CollectOptions): Promise<CollectOutcome> {
   const home = opts.home ?? (await import("node:os")).homedir();
-  const wanted = new Set(opts.agents.length === 0 ? ALL_AGENTS : opts.agents);
+  const wanted = new Set(opts.harnesses.length === 0 ? ALL_HARNESSES : opts.harnesses);
   const statuses: SourceStatus[] = [];
   const results: ParseResult[] = [];
 
@@ -102,7 +102,7 @@ export async function collectAll(opts: CollectOptions): Promise<CollectOutcome> 
     }
     dbs.sort();
     if (dbs.length === 0) {
-      statuses.push({agent: "opencode", found: false, detail: `${dir}/opencode*.db`});
+      statuses.push({harness: "opencode", found: false, detail: `${dir}/opencode*.db`});
     } else {
       const records: UsageRecord[] = [];
       const skipped: string[] = [];
@@ -110,19 +110,19 @@ export async function collectAll(opts: CollectOptions): Promise<CollectOutcome> 
         try {
           const r = await collectOpencode(dbPath, opts.sinceMs);
           records.push(...r.records);
-          statuses.push({agent: "opencode", found: true, detail: `${dbPath} (${r.records.length} 会话)`});
+          statuses.push({harness: "opencode", found: true, detail: `${dbPath} (${r.records.length} 会话)`});
         } catch (e) {
           skipped.push(`${dbPath} (${errMsg(e)})`);
-          statuses.push({agent: "opencode", found: true, detail: `${dbPath} (收集失败: ${errMsg(e)})`});
+          statuses.push({harness: "opencode", found: true, detail: `${dbPath} (收集失败: ${errMsg(e)})`});
         }
       }
-      results.push({agent: "opencode", records, skippedFiles: skipped});
+      results.push({harness: "opencode", records, skippedFiles: skipped});
     }
   }
 
   // --- claude-code / codex (jsonl 双源, 同骨架: stat → walk → collect → status) ---
   interface JsonlSpec {
-    agent: AgentId;
+    harness: HarnessId;
     root: string;
     notFoundDetail: string; // 探测位置描述 (未 found 时)
     fileFilter: (p: string) => boolean;
@@ -141,17 +141,17 @@ export async function collectAll(opts: CollectOptions): Promise<CollectOutcome> 
       // 目录不存在/不可读 → 未发现
     }
     if (!dirExists) {
-      statuses.push({agent: spec.agent, found: false, detail: spec.notFoundDetail});
+      statuses.push({harness: spec.harness, found: false, detail: spec.notFoundDetail});
       return;
     }
     // 目录存在但文件为空 (全被日期剪枝/空目录) 仍报 found — "窗口外有数据"≠"源未装"
     const r = await spec.collect(files, opts.sinceMs);
-    statuses.push({agent: spec.agent, found: true, detail: `${files.length} 个会话文件 (窗口内 ${r.records.length} ${spec.unit})`});
+    statuses.push({harness: spec.harness, found: true, detail: `${files.length} 个会话文件 (窗口内 ${r.records.length} ${spec.unit})`});
     results.push(r);
   };
   const specs: JsonlSpec[] = [
     {
-      agent: "claude-code",
+      harness: "claude-code",
       root: join(home, ".claude", "projects"),
       notFoundDetail: `${join(home, ".claude", "projects")}/**/*.jsonl`,
       fileFilter: (p) => p.endsWith(".jsonl"),
@@ -160,7 +160,7 @@ export async function collectAll(opts: CollectOptions): Promise<CollectOutcome> 
       unit: "条消息",
     },
     {
-      agent: "codex",
+      harness: "codex",
       root: join(home, ".codex", "sessions"),
       notFoundDetail: `${join(home, ".codex", "sessions")}/**/rollout-*.jsonl`,
       fileFilter: (p) => p.endsWith(".jsonl") && /(?:^|\/)rollout-[^/]*\.jsonl$/.test(p),
@@ -177,7 +177,7 @@ export async function collectAll(opts: CollectOptions): Promise<CollectOutcome> 
     },
   ];
   for (const spec of specs) {
-    if (wanted.has(spec.agent)) await collectJsonl(spec);
+    if (wanted.has(spec.harness)) await collectJsonl(spec);
   }
 
   return {results, statuses};

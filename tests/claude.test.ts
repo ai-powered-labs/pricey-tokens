@@ -17,7 +17,7 @@ describe("collectClaude", () => {
         claudeAssistant({msgId: "m2", input: 5, output: 6, ts: T0 + 2}),
       ]);
       const r = await collectClaude([f], null);
-      expect(r.agent).toBe("claude-code");
+      expect(r.harness).toBe("claude-code");
       expect(r.records).toHaveLength(2);
       expect(r.records[0]).toMatchObject({model: "claude-sonnet-5", ts: T0 + 1, inputTokens: 30, outputTokens: 40});
       expect(r.records[1]).toMatchObject({inputTokens: 5, outputTokens: 6});

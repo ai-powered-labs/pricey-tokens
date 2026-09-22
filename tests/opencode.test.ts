@@ -26,7 +26,7 @@ describe("collectOpencode 新 schema (session 汇总)", () => {
         {model: JSON.stringify({id: "glm-5.3", providerID: "zai-coding-plan"}), input: 100, output: 50, reasoning: 7, cacheRead: 5000, cacheWrite: 300, time: T0},
       ]);
       const r = await collectOpencode(db, null);
-      expect(r.agent).toBe("opencode");
+      expect(r.harness).toBe("opencode");
       expect(r.records).toEqual([
         {model: "zai-coding-plan/glm-5.3", ts: T0, inputTokens: 100, outputTokens: 57, cacheReadTokens: 5000, cacheWriteTokens: 300},
       ]);

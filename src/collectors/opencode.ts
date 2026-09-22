@@ -157,10 +157,10 @@ export async function collectOpencode(dbPath: string, sinceMs: number | null): P
       ? new Set(db.all("PRAGMA table_info(session)").map((r) => String(r.name)))
       : new Set<string>();
     if (sessionCols.has("tokens_input")) {
-      return {agent: "opencode", records: sessionRecords(db, sessionCols, sinceMs), skippedFiles: []};
+      return {harness: "opencode", records: sessionRecords(db, sessionCols, sinceMs), skippedFiles: []};
     }
     if (tables.has("message")) {
-      return {agent: "opencode", records: messageRecords(db, sinceMs), skippedFiles: []};
+      return {harness: "opencode", records: messageRecords(db, sinceMs), skippedFiles: []};
     }
     throw new Error(`opencode db 无可用用量源: session 表缺 tokens 汇总列或不存在, 且无 message 表 (现有表: ${[...tables].join(", ") || "无"})`);
   } finally {

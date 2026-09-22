@@ -6,9 +6,9 @@
 //   ② 月速率 (ProfileV1): spanDays = ceil((lastTs-firstTs)/86400000) 钳 [1, 3650]
 //      (契约域); 各模型月速率 = round(总量 × 30 / spanDays) — 与 spanDays 自洽
 //      (引擎侧 30/spanDays 外推还原原值, 站点种子档案同口径)。
-// agent 字段: 单源 = 源名; 多源 = "mixed" (契约是自由串, 站点按 agent 过滤分榜,
-// 混合档案如实标注)。模型 id 保留 agent 原始串 (含 opencode provider 前缀)。
-import type {AgentId, ParseResult, ProfileV1, UsageRecord} from "./types.js";
+// harness 字段: 单源 = 源名; 多源 = "mixed" (契约是自由串, 站点按 harness 过滤分榜,
+// 混合档案如实标注)。模型 id 保留原始串 (含 opencode provider 前缀)。
+import type {HarnessId, ParseResult, ProfileV1, UsageRecord} from "./types.js";
 
 const DAY_MS = 86400000;
 
@@ -29,9 +29,9 @@ export interface Aggregation {
 // claude 与 codex 各自目录) — 直接拼接。
 export function aggregate(results: ParseResult[], toolVersion: string): Aggregation | null {
   const all: UsageRecord[] = [];
-  const agents = new Set<AgentId>();
+  const harnesses = new Set<HarnessId>();
   for (const r of results) {
-    agents.add(r.agent);
+    harnesses.add(r.harness);
     for (const rec of r.records) all.push(rec);
   }
   if (all.length === 0) return null;
@@ -84,10 +84,10 @@ export function aggregate(results: ParseResult[], toolVersion: string): Aggregat
     }))
     .sort((a, b) => b.inputT + b.outputT + b.cacheReadT + b.cacheWriteT - (a.inputT + a.outputT + a.cacheReadT + a.cacheWriteT));
 
-  const agent = agents.size === 1 ? ([...agents][0] as string) : "mixed";
+  const harness = harnesses.size === 1 ? ([...harnesses][0] as string) : "mixed";
   const profile: ProfileV1 = {
     schema: "pricey-tokens-profile/v1",
-    agent,
+    harness,
     spanDays,
     models,
     planUsed: null,

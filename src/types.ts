@@ -106,4 +106,5 @@ export interface Options {
   harnesses: HarnessId[]; // 空数组 = 全部源
   api: string; // 上传 API base (无尾斜杠)
   site: string; // 分享站点 base (以 / 结尾或含 /calc/ 路径)
+  plan?: string; // --plan 声明的在用套餐 id (trim 后非空; undefined = 未给 flag, 落到 config.json)
 }

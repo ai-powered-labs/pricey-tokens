@@ -1,6 +1,6 @@
 // args.test.ts — CLI 参数解析测试
 // 覆盖: 布尔旗标、--days 数字/all/非法、--harness 逗号与重复、--api 尾斜杠归一、
-// --site 校验、默认值、未知参数与 --share 前置条件。
+// --site 校验、--plan 正常/缺值/空串/重复覆盖、默认值、未知参数与 --share 前置条件。
 import {describe, expect, it} from "bun:test";
 import {parseArgs, ArgsError, DEFAULT_API, DEFAULT_SITE} from "../src/args.js";
 
@@ -18,6 +18,8 @@ describe("parseArgs 默认值", () => {
       harnesses: [],
       api: DEFAULT_API,
       site: DEFAULT_SITE,
+      // plan 未给 (可选属性, exactOptionalPropertyTypes 下不显式置 undefined;
+      // toEqual 语义: 缺省键与 undefined 相等)
     });
     expect(DEFAULT_API).toBe("https://pricey-tokens.lambda.lc");
     expect(DEFAULT_SITE).toBe("https://pricey-tokens.lambda.lc/calc/");
@@ -69,6 +71,23 @@ describe("parseArgs 旗标与带值参数", () => {
   it("--site 保留路径; 非 http(s) 报错", () => {
     expect(parseArgs(["--site", "http://localhost:4321/calc/"]).site).toBe("http://localhost:4321/calc/");
     expect(() => parseArgs(["--site", "localhost:4321"])).toThrow(ArgsError);
+  });
+
+  it("--plan 正常 / = 形态 / 值 trim", () => {
+    expect(parseArgs(["--plan", "pro"]).plan).toBe("pro");
+    expect(parseArgs(["--plan=pro"]).plan).toBe("pro");
+    expect(parseArgs(["--plan", "  pro  "]).plan).toBe("pro");
+  });
+
+  it("--plan 缺值 / 空串 / 纯空白报错", () => {
+    expect(() => parseArgs(["--plan"])).toThrow(ArgsError);
+    for (const bad of [["--plan", ""], ["--plan", "   "], ["--plan="]] as string[][]) {
+      expect(() => parseArgs(bad)).toThrow("--plan");
+    }
+  });
+
+  it("--plan 重复以后者为准 (与 --api/--site 同款覆盖语义)", () => {
+    expect(parseArgs(["--plan", "a", "--plan", "b"]).plan).toBe("b");
   });
 });
 

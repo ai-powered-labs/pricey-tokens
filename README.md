@@ -45,6 +45,7 @@ node 内置 `node:sqlite` — 更老的 node 无法运行本 CLI)。
 | `--harness LIST` | 只收集指定源: `opencode,claude-code,codex` 逗号分隔 | 全部 |
 | `--api URL` | 上传 API base | `https://pricey-tokens.lambda.lc` |
 | `--site URL` | 分享站点 base (本地开发 `http://localhost:PORT/calc/`) | `https://pricey-tokens.lambda.lc/calc/` |
+| `--plan ID` | 声明在用的套餐 (上传档案 `planUsed` 关联, 见下节) | 未声明 |
 | `--help` / `--version` | 帮助 / 版本 | — |
 
 ### 输出分级
@@ -134,10 +135,42 @@ node ≥ 22.5 (内置 `node:sqlite`)。
 - **分享 hash 比特兼容**: 本包生成的 `#u=` 与站点 `src/share/hash.ts` 同算法同
   键序 (golden vector 测试固化), 站点 `decodeShare` 可直接解。
 
+## 声明你在用的套餐 (可选)
+
+上传档案有可选字段 `planUsed` — 声明你实际在用的订阅套餐后, 站点的分享页与
+排行会把你的用量画像与该套餐关联 (换算口径对齐), 数据积累也将作为未来的聚合
+维度。不声明完全不影响采集与上传。
+
+**怎么查套餐 id**: 站点套餐页的 URL 即 id — `https://pricey-tokens.lambda.lc/plan/<id>/`。
+
+两种声明方式:
+
+```console
+# 一次性 (只影响本次上传)
+$ pricey-tokens --upload --plan <id>
+
+# 持久 (之后每次上传自动携带; 会被 --plan 覆盖)
+$ mkdir -p ~/.config/pricey-tokens
+$ echo '{"plan": "<id>"}' > ~/.config/pricey-tokens/config.json
+```
+
+- 优先级: `--plan` 参数 > config.json > 未声明 (`null`)。
+- config 路径: 上文命令写的是默认位置 `~/.config/pricey-tokens/config.json`;
+  若设置了 `XDG_CONFIG_HOME` (须绝对路径), 实际读取
+  `$XDG_CONFIG_HOME/pricey-tokens/config.json` — 写错位置会被静默视为未声明。
+- config 读取全容错: 文件不存在 / 不可读 / 非法 JSON / `plan` 非字符串或空白 → 静默视为
+  未声明, 不报错不警告 (声明是可选增强, 不阻塞采集)。
+- **打错字不必担心**: 本包不内置套餐清单 (以站点为准, 避免双端漂移), 服务端会
+  校验 `planUsed` 须在套餐清单内 — 未知 id 上传返回 400 与可读错误提示, 改对
+  再传即可。
+- 取消声明: 不加 `--plan` 并删掉 config.json 里的 `plan` 字段。
+
 ## 上传预览示例
 
 ```console
 $ pricey-tokens --upload --days 30
+
+套餐声明: 未声明 — 加 --plan <id> 或在 ~/.config/pricey-tokens/config.json 写 {"plan": "<id>"} 后, 排行与分享页将关联你的套餐 (可用套餐 id 见站点首页套餐排行)
 
 === 将上传的完整内容 (ProfileV2, 日粒度模型四分类计数 + 会话/请求/轮次/工具调用计数 + ctx/输出规模/会话最深上下文直方图桶计数, 无会话内容) ===
 
@@ -168,7 +201,7 @@ $ pricey-tokens --upload --days 30
 
 ```console
 $ bun install
-$ bun test          # 135 个测试 (账本幂等/水位线/对账/迁移 / 三家解析器 / ctx+out 直方图契约 / session 归因 / hash golden / 参数 / CLI 编排 / 上传)
+$ bun test          # 177 个测试 (账本幂等/水位线/对账/迁移 / 三家解析器 / ctx+out 直方图契约 / session 归因 / hash golden / 参数 / CLI 编排 / 上传 / 套餐声明)
 $ bun run typecheck # TS 严格 (含 tests)
 $ bun run build     # tsc → dist/ (node ESM, bin shebang)
 ```

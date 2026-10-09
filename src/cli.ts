@@ -18,6 +18,7 @@ import {localDayKey} from "./day.js";
 import {encodeShare, sharePayloadOf, buildShareUrl, HASH_WARN_BYTES} from "./share.js";
 import {previewText, confirmUpload, uploadProfile} from "./upload.js";
 import {loadOrCreateDeviceKey} from "./device-key.js";
+import {readDeclaredPlan} from "./config.js";
 import {openUrl} from "./browser.js";
 import {dataHome} from "./discover.js";
 import {renderSummary} from "./report.js";
@@ -124,11 +125,15 @@ async function main(): Promise<number> {
   let exit = 0;
 
   // ③ 出口: --json / --upload 共用的 ProfileV2 (生成处保证 ΣctxHist==nReq 不变量)
+  // planUsed 三态优先级: --plan flag > config.json > null (未声明 — 读取全容错,
+  // 见 config.ts; 套餐 id 的 SSOT 是站点套餐清单 (详情页 URL 即 id, 站点无 /plan
+  // 索引页 — 清单入口是首页套餐排行), 打错字由服务端 400 拦截)
+  const planUsed = opts.plan ?? (await readDeclaredPlan(home));
   const profile: ProfileV2 = {
     schema: "pricey-tokens-profile/v2",
     harness,
     days,
-    planUsed: null,
+    planUsed,
     collectedAt: Date.now(),
     toolVersion: VERSION,
     trust: "anon", // 具服务端证明力的 github 档是 API B3 交付物, CLI 恒 anon
@@ -139,6 +144,10 @@ async function main(): Promise<number> {
   }
 
   if (opts.upload) {
+    // 套餐声明回显 (预览顶部): 确认前让用户看到档案将关联的套餐与声明来源
+    err(planUsed === null
+      ? "套餐声明: 未声明 — 加 --plan <id> 或在 ~/.config/pricey-tokens/config.json 写 {\"plan\": \"<id>\"} 后, 排行与分享页将关联你的套餐 (可用套餐 id 见站点首页套餐排行)"
+      : `套餐声明: ${planUsed} (来源: ${opts.plan !== undefined ? "--plan 参数" : "config 文件"})`);
     err("\n=== 将上传的完整内容 (ProfileV2, 日粒度模型四分类计数 + 会话/请求/轮次/工具调用计数 + ctx/输出规模/会话最深上下文直方图桶计数, 无会话内容) ===\n");
     err(previewText(profile));
     err("\n=== 预览结束 ===\n");

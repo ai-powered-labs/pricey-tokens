@@ -1,7 +1,8 @@
 // cli.test.ts — CLI 编排出口测试 (子进程跑 src/cli.ts, 断言退出码与 stdout/stderr 纪律)
 // 覆盖: --help/--version 前置短路 (exit 0, 不落参数错误)、未知参数 exit 1、空数据
 // home exit 1、--json stdout 纯净可 parse、默认模式 stdout 是 URL 且零副作用
-// (不调系统浏览器)、--web 显式调起、--web 互斥校验、HOME/XDG 注入。
+// (不调系统浏览器)、--web 显式调起、--web 互斥校验、HOME/XDG 注入、套餐声明
+// planUsed 三态优先级 (--plan > config.json > null) 与 --upload 预览回显。
 import {describe, expect, it} from "bun:test";
 import {mkdtemp, mkdir, rm, writeFile, readFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
@@ -330,6 +331,78 @@ describe("cli 输出分级 (--verbose)", () => {
       expect(r.stderr).toContain("将上传的完整内容");
       expect(r.stderr).toContain("已隐藏"); // 跳过压缩提示照常
       expect(r.stderr).not.toContain("用量摘要");
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("cli 套餐声明 (planUsed: --plan flag > config.json > null)", () => {
+  // emptyHome 的 XDG_CONFIG_HOME 即 <home>/.config — config.json 写这里即命中
+  async function writePlanConfig(home: string, plan: string): Promise<void> {
+    await mkdir(join(home, ".config", "pricey-tokens"), {recursive: true});
+    await writeFile(join(home, ".config", "pricey-tokens", "config.json"), JSON.stringify({plan}));
+  }
+
+  // 有 claude 数据的 home (--json 出口断言 planUsed 的公共脚手架)
+  async function homeWithClaude(): Promise<{home: string; env: Record<string, string>; cleanup: () => Promise<void>}> {
+    const h = await emptyHome();
+    await writeLines(`${h.home}/.claude/projects/p/s.jsonl`, [
+      claudeAssistant({msgId: "m1", input: 100, output: 10, ts: Date.now() - 86400000}),
+    ]);
+    return {home: h.home, env: h.env, cleanup: h.cleanup};
+  }
+
+  it("flag 覆盖 config: --plan 赢; --json 的 planUsed 与实际一致", async () => {
+    const h = await homeWithClaude();
+    try {
+      await writePlanConfig(h.home, "cfg-plan");
+      const r = await runCli(["--json", "--days", "7", "--plan", "flag-plan"], h.env);
+      expect(r.code).toBe(0);
+      expect(JSON.parse(r.stdout).planUsed).toBe("flag-plan");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("flag 缺省 → 用 config.json; 双缺省 → null (三态齐)", async () => {
+    const h = await homeWithClaude();
+    try {
+      await writePlanConfig(h.home, "cfg-plan");
+      const withCfg = await runCli(["--json", "--days", "7"], h.env);
+      expect(JSON.parse(withCfg.stdout).planUsed).toBe("cfg-plan");
+      const noCfgHome = await homeWithClaude(); // 无 config 的干净 home
+      try {
+        const noCfg = await runCli(["--json", "--days", "7"], noCfgHome.env);
+        expect(JSON.parse(noCfg.stdout).planUsed).toBeNull();
+      } finally {
+        await noCfgHome.cleanup();
+      }
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("--upload 预览回显: 已声明显示值与来源 (flag / config 两形态)", async () => {
+    const h = await homeWithClaude();
+    try {
+      const viaFlag = await runCli(["--upload", "--days", "7", "--plan", "p1"], h.env); // 非 TTY → 预览后取消
+      expect(viaFlag.stderr).toContain("套餐声明: p1 (来源: --plan 参数)");
+      await writePlanConfig(h.home, "p2");
+      const viaCfg = await runCli(["--upload", "--days", "7"], h.env);
+      expect(viaCfg.stderr).toContain("套餐声明: p2 (来源: config 文件)");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("--upload 预览回显: 未声明给出一行引导提示 (指向 --plan 与站点首页套餐排行)", async () => {
+    const h = await homeWithClaude();
+    try {
+      const r = await runCli(["--upload", "--days", "7"], h.env);
+      expect(r.stderr).toContain("套餐声明: 未声明");
+      expect(r.stderr).toContain("--plan");
+      expect(r.stderr).toContain("首页套餐排行");
     } finally {
       await h.cleanup();
     }

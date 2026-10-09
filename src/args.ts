@@ -59,6 +59,7 @@ export function parseArgs(rawArgv: string[]): Options {
     else if (arg === "--harness") parseHarnesses(value());
     else if (arg === "--api") opts.api = normalizeBase(value());
     else if (arg === "--site") opts.site = siteValue(value());
+    else if (arg === "--plan") opts.plan = planValue(value());
     else throw new ArgsError(`未知参数: ${arg} (用 --help 查看用法)`);
   }
   if (opts.share && !opts.upload) throw new ArgsError("--share 需与 --upload 同用 (分享 URL 由上传响应派生)");
@@ -87,6 +88,14 @@ export function parseArgs(rawArgv: string[]): Options {
     if (!/^https?:\/\//.test(v)) throw new ArgsError(`--site 参数值非法: ${v} (应为 http(s):// 开头的站点 base)`);
     return v;
   }
+
+  // 空串拒绝 (config.json 侧空串是静默未声明 — flag 是显式输入, 错了要立刻纠正);
+  // 重复给出以后者为准 (与 --api/--site 同款覆盖语义)
+  function planValue(v: string): string {
+    const trimmed = v.trim();
+    if (trimmed === "") throw new ArgsError(`--plan 参数值非法: ${v} (应为非空套餐 id, 可用 id 见站点首页套餐排行)`);
+    return trimmed;
+  }
 }
 
 export const HELP_TEXT = `pricey-tokens — 本机 AI coding agent 用量收集器
@@ -108,6 +117,9 @@ export const HELP_TEXT = `pricey-tokens — 本机 AI coding agent 用量收集�
   --api URL          上传 API base (默认 https://pricey-tokens.lambda.lc)
   --site URL         分享站点 base (默认 https://pricey-tokens.lambda.lc/calc/,
                      本地开发: http://localhost:PORT/calc/)
+  --plan ID          声明在用的套餐, 上传档案将关联 (可用 id 见站点首页套餐排行,
+                     套餐详情页 URL /plan/<id>/ 中的 <id> 即 id;
+                     也可持久写进 ~/.config/pricey-tokens/config.json, flag 优先)
   --help             显示本帮助
   --version          显示版本
 
